@@ -1,9 +1,13 @@
 import numpy as np
 import torch
-from torchvision import transforms
-from torchvision import datasets
 from PIL import Image
+from torch.utils.data import DataLoader
+from torch.utils.data.sampler import SubsetRandomSampler
+from torchvision import datasets, transforms
 
+# --------
+# Datasets
+# --------
 
 class IncrementalDataset(torch.utils.data.Dataset):
     _base_dataset = None
@@ -11,7 +15,7 @@ class IncrementalDataset(torch.utils.data.Dataset):
     _common_transforms = [transforms.ToTensor()]
 
     def __init__(self, data_path="data", train=True, randomize_class=False,
-                 increment=10):
+                 increment=10, shuffle=True, workers=10, batch_size=128):
         self._train = train
         self._increment = increment
 
@@ -27,7 +31,35 @@ class IncrementalDataset(torch.utils.data.Dataset):
         trsf = trsf + self._common_transforms
         self._transforms = transforms.Compose(trsf)
 
+        self._shuffle = shuffle
+        self._workers = workers
+        self._batch_size = batch_size
+
         self.set_classes_range(0, self._increment)
+
+    def get_loader(self, validation_split=0.):
+        if validation_split:
+            indices = np.arange(len(self))
+            np.random.shuffle(indices)
+            split_idx = int(len(self) * validation_split)
+            val_indices = indices[:split_idx]
+            train_indices = indices[split_idx:]
+            print("Val {}; Train {}.".format(val_indices.shape[0], train_indices.shape[0]))
+
+            train_loader = self._get_loader(SubsetRandomSampler(train_indices))
+            val_loader = self._get_loader(SubsetRandomSampler(val_indices))
+            return train_loader, val_loader
+
+        return self._get_loader(), None
+
+    def _get_loader(self, sampler=None):
+        return DataLoader(
+            dataset=self,
+            batch_size=self._batch_size,
+            shuffle=False if sampler else self._shuffle,
+            num_workers=self._workers,
+            sampler=sampler
+        )
 
     @property
     def total_n_classes(self):
@@ -110,3 +142,8 @@ class iPermutedMNIST(iMNIST):
         data = data[:, permutation, :]
 
         return data.reshape(b, w, h, c)
+
+
+# --------------
+# Data utilities
+# --------------
