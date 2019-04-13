@@ -1,11 +1,18 @@
+import random
+
+import numpy as np
+import torch
+
 from inclearn import factory, results_utils, utils
 
 
 def train(args):
+    _set_seed(args["seed"])
+
     factory.set_device(args)
 
     train_set = factory.get_data(args, train=True)
-    test_set = factory.get_data(args, train=False)
+    test_set = factory.get_data(args, train=False, classes_order=train_set.classes_order)
 
     train_loader, val_loader = train_set.get_loader(args["validation"])
     test_loader, _ = test_set.get_loader()
@@ -40,3 +47,10 @@ def train(args):
         results["results"].append(acc_stats)
 
     results_utils.save_results(results, args["name"])
+
+
+
+def _set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)

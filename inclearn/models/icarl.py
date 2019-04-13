@@ -30,7 +30,7 @@ class ICarl(IncrementalLearner):
         self._n_classes = args["increment"]
 
         self._features_extractor = factory.get_resnet(args["convnet"])
-        self._classifier = nn.Linear(2048, self._n_classes, bias=False)
+        self._classifier = nn.Linear(self._features_extractor.out_dim, self._n_classes, bias=True)
         self._dropout = torch.nn.Dropout(args["dropout"], False)
 
         self._examplars = {}
@@ -235,15 +235,15 @@ class ICarl(IncrementalLearner):
         self._n_classes += n
 
         weight = self._classifier.weight.data
-        #bias = self._classifier.bias.data
+        bias = self._classifier.bias.data
 
         self._classifier = nn.Linear(
             self._features_extractor.out_dim, self._n_classes,
-            bias=False
+            bias=True
         ).to(self._device)
 
         self._classifier.weight.data[: self._n_classes - n] = weight
-        #self._classifier.bias.data[: self._n_classes - n] = bias
+        self._classifier.bias.data[: self._n_classes - n] = bias
 
         print("Now {} examplars per class.".format(self._m))
 

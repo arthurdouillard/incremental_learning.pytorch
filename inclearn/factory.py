@@ -31,14 +31,22 @@ def get_model(args):
     raise NotImplementedError(arg["model"])
 
 
-def get_data(args, train=True):
-    if args["dataset"].lower() in ("icifar100", "cifar100"):
-        return data.iCIFAR100(increment=args["increment"], train=train)
-    if args["dataset"].lower() in ("icifar10", "cifar10"):
-        return data.iCIFAR10(increment=args["increment"], train=train)
+def get_data(args, train=True, classes_order=None):
+    dataset_name = args["dataset"].lower()
 
-    raise NotImplementedError(args["dataset"])
+    if dataset_name in ("icifar100", "cifar100"):
+        dataset = data.iCIFAR100
+    elif dataset_name in ("icifar10", "cifar10"):
+        dataset = data.iCIFAR10
+    else:
+        raise NotImplementedError(dataset_name)
 
+    return dataset(
+        increment=args["increment"],
+        train=train,
+        randomize_class=args["random_classes"],
+        classes_order=classes_order
+    )
 
 def set_device(args):
     device_type = args["device"]

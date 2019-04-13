@@ -14,6 +14,7 @@ def get_template_results(args):
 
 
 def save_results(results, label):
+    del results["config"]["device"]
     file_path = "{}_{}.json".format(utils.get_date(), label)
     with open(os.path.join("results", file_path), "w+") as f:
         json.dump(results, f)

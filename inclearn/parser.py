@@ -30,6 +30,8 @@ def get_parser():
                         help="Number of workers preprocessing the data.")
     parser.add_argument("-v", "--validation", default=0., type=float,
                         help="Validation split (0. <= x <= 1.).")
+    parser.add_argument("-random", "--random-classes", action="store_true", default=False,
+                        help="Randomize classes order of increment")
 
     # Training related:
     parser.add_argument("-lr", "--lr", default=0.001, type=float,
@@ -50,5 +52,7 @@ def get_parser():
                         help="GPU index to use, for cpu use -1.")
     parser.add_argument("--name", default="exp",
                         help="Experience name")
+    parser.add_argument("-seed", "--seed", default=1, type=int,
+                        help="Random seed.")
 
     return parser

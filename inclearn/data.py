@@ -15,7 +15,8 @@ class IncrementalDataset(torch.utils.data.Dataset):
     _common_transforms = [transforms.ToTensor()]
 
     def __init__(self, data_path="data", train=True, randomize_class=False,
-                 increment=10, shuffle=True, workers=10, batch_size=128):
+                 increment=10, shuffle=True, workers=10, batch_size=128,
+                 classes_order=None):
         self._train = train
         self._increment = increment
 
@@ -27,6 +28,14 @@ class IncrementalDataset(torch.utils.data.Dataset):
         self._data = self._preprocess_initial_data(dataset.data)
         self._targets = np.array(dataset.targets)
 
+        if classes_order is None:
+            self.classes_order = np.sort(np.unique(self._targets))
+
+            if randomize_class:
+                np.random.shuffle(self.classes_order)
+        else:
+            self.classes_order = classes_order
+
         trsf = self._train_transforms if train else []
         trsf = trsf + self._common_transforms
         self._transforms = transforms.Compose(trsf)
@@ -35,6 +44,7 @@ class IncrementalDataset(torch.utils.data.Dataset):
         self._workers = workers
         self._batch_size = batch_size
 
+        print("Classes order: ", self.classes_order)
         self.set_classes_range(0, self._increment)
 
     def get_loader(self, validation_split=0.):
@@ -72,12 +82,11 @@ class IncrementalDataset(torch.utils.data.Dataset):
         self._low_range = low
         self._high_range = high
 
-        if low != high:
-            idxes = np.where(
-                np.logical_and(self._targets >= low, self._targets < high)
-            )[0]
-        else:
-            idxes = np.where(self._targets == low)[0]
+        if low == high:
+            high = high + 1
+
+        classes = self.classes_order[low:high]
+        idxes = np.where(np.isin(self._targets, classes))[0]
 
         self._mapping = {fake_idx: real_idx for fake_idx, real_idx in enumerate(idxes)}
 
@@ -98,10 +107,13 @@ class IncrementalDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         real_idx = self._mapping[idx]
-        x, y = self._data[real_idx], self._targets[real_idx]
+        x, real_y = self._data[real_idx], self._targets[real_idx]
 
         x = Image.fromarray(x)
         x = self._transforms(x)
+
+        y = np.where(self.classes_order == real_y)[0][0]
+
         return (real_idx, idx), x, y
 
 
