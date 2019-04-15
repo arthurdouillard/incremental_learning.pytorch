@@ -138,6 +138,8 @@ class ICarl(IncrementalLearner):
 
         return ypred, ytrue
 
+    def get_memory_indexes(self):
+        return self.examplars
 
     # -----------
     # Private API
@@ -282,11 +284,12 @@ class ICarl(IncrementalLearner):
         return distances.argmin().item()
 
     def _build_examplars(self, loader):
-        examplars = []
         examplars_means = []
 
         self.eval()
         for class_idx in range(0, self._n_classes):
+            examplars = []
+
             loader.dataset.set_classes_range(class_idx, class_idx)
 
             features, class_mean = self._extract_features(loader)
@@ -302,7 +305,6 @@ class ICarl(IncrementalLearner):
 
             examplars_means.append(examplars_mean / len(examplars))
             self._examplars[class_idx] = examplars
-
         self._means = torch.stack(examplars_means)
         self._means = F.normalize(self._means)
 
@@ -319,5 +321,6 @@ class ICarl(IncrementalLearner):
         )
 
     def reduce_examplars(self):
+        raise NotImplementedError
         for class_idx in range(len(self._examplars)):
             self._examplars[class_idx] = self._examplars[class_idx][: self._m]

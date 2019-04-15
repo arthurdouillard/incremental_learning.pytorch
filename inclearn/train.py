@@ -23,7 +23,9 @@ def train(args):
 
     for task in range(0, train_set.total_n_classes // args["increment"]):
         # Setting current task's classes:
-        train_set.set_classes_range(high=(task + 1) * args["increment"])
+
+        train_set.set_classes_range(low=task * args["increment"],
+                                    high=(task + 1) * args["increment"])
         test_set.set_classes_range(high=(task + 1) * args["increment"])
 
         model.set_task_info(
@@ -46,11 +48,15 @@ def train(args):
         print(acc_stats)
         results["results"].append(acc_stats)
 
+        memory_indexes = model.get_memory_indexes()
+        train_set.set_memory(memory_indexes)
+
     results_utils.save_results(results, args["name"])
 
 
 
 def _set_seed(seed):
+    print("Set seed", seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

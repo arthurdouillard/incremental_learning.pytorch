@@ -44,6 +44,8 @@ class IncrementalDataset(torch.utils.data.Dataset):
         self._workers = workers
         self._batch_size = batch_size
 
+        self._memory_idxes = []
+
         print("Classes order: ", self.classes_order)
         self.set_classes_range(0, self._increment)
 
@@ -89,15 +91,22 @@ class IncrementalDataset(torch.utils.data.Dataset):
         idxes = np.where(np.isin(self._targets, classes))[0]
 
         self._mapping = {fake_idx: real_idx for fake_idx, real_idx in enumerate(idxes)}
+        if len(self._memory_idxes) > 0 and low != high:
+            examplars_mapping = {
+                fake_idx: real_idx
+                for fake_idx, real_idx in zip(
+                    range(len(self._mapping), len(self._memory_idxes)+len(self._mapping)),
+                    self._memory_idxes
+                )
+            }
+            for k, v in examplars_mapping.items():
+                assert k not in self._mapping
+                self._mapping[k] = v
 
-    def set_examplars(self, idxes):
-        examplars_mapping = {
-            fake_idx: real_idx
-            for fake_idx, real_idx in zip(range(len(self._mapping), len(idxes)), idxes)
-        }
-        for k in examplars_mapping:
-            assert k not in self._mapping
-        self._mapping.update(examplars_mapping)
+    def set_memory(self, idxes):
+        print("Setting {} memory examplars.".format(len(idxes)))
+        self._memory_idxes = idxes
+
 
     def get_true_index(self, fake_idx):
         return self._mapping[fake_idx]

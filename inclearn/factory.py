@@ -1,9 +1,7 @@
 import torch
 from torch import optim
 
-import data
-import models
-import resnet
+from inclearn import data, models, resnet
 
 
 def get_optimizer(params, optimizer, lr, weight_decay=0.0):

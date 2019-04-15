@@ -1,5 +1,1 @@
-import data
-import factory
-import models
-import resnet
-import utils
+from inclearn import data, factory, models, resnet, utils
