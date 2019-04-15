@@ -13,11 +13,11 @@ def get_optimizer(params, optimizer, lr, weight_decay=0.0):
     raise NotImplementedError
 
 
-def get_resnet(resnet_type):
+def get_resnet(resnet_type, **kwargs):
     if resnet_type == "resnet18":
-        return resnet.resnet18()
+        return resnet.resnet18(**kwargs)
     elif resnet_type == "resnet34":
-        return resnet.resnet101()
+        return resnet.resnet101(**kwargs)
 
     raise NotImplementedError(resnet_type)
 

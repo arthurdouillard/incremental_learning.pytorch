@@ -29,21 +29,19 @@ class ICarl(IncrementalLearner):
         self._k = args["memory_size"]
         self._n_classes = args["increment"]
 
-        self._features_extractor = factory.get_resnet(args["convnet"])
+        self._features_extractor = factory.get_resnet(args["convnet"], nf=32)
         self._classifier = nn.Linear(self._features_extractor.out_dim, self._n_classes, bias=True)
-        self._dropout = torch.nn.Dropout(args["dropout"], False)
 
         self._examplars = {}
         self._means = None
 
-        self._clf_loss = F.binary_cross_entropy_with_logits#nn.CrossEntropyLoss()
-        self._distil_loss = F.binary_cross_entropy_with_logits#nn.BCEWithLogitsLoss()
+        self._clf_loss = F.binary_cross_entropy_with_logits
+        self._distil_loss = F.binary_cross_entropy_with_logits
 
         self.to(self._device)
 
     def forward(self, x):
         x = self._features_extractor(x)
-        x = self._dropout(x)
         x = self._classifier(x)
         return x
 
@@ -130,6 +128,7 @@ class ICarl(IncrementalLearner):
 
 
     def _after_task(self, data_loader):
+        self._reduce_examplars()
         self._build_examplars(data_loader)
 
     def _eval_task(self, data_loader):
@@ -287,7 +286,9 @@ class ICarl(IncrementalLearner):
         examplars_means = []
 
         self.eval()
-        for class_idx in range(0, self._n_classes):
+        print("Building examplars for classes {} -> {}.".format(
+            self._task * self._task_size, self._n_classes))
+        for class_idx in range(self._task * self._task_size, self._n_classes):
             examplars = []
 
             loader.dataset.set_classes_range(class_idx, class_idx)
@@ -305,7 +306,11 @@ class ICarl(IncrementalLearner):
 
             examplars_means.append(examplars_mean / len(examplars))
             self._examplars[class_idx] = examplars
-        self._means = torch.stack(examplars_means)
+
+        if self._means is None:
+            self._means = torch.stack(examplars_means)
+        else:
+            self._means = torch.cat([self._means, torch.stack(examplars_means)])
         self._means = F.normalize(self._means)
 
         self.train()
@@ -320,7 +325,6 @@ class ICarl(IncrementalLearner):
             ]
         )
 
-    def reduce_examplars(self):
-        raise NotImplementedError
+    def _reduce_examplars(self):
         for class_idx in range(len(self._examplars)):
             self._examplars[class_idx] = self._examplars[class_idx][: self._m]
