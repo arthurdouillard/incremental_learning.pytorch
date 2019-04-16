@@ -51,7 +51,8 @@ def train(args):
         memory_indexes = model.get_memory_indexes()
         train_set.set_memory(memory_indexes)
 
-    results_utils.save_results(results, args["name"])
+    if args["name"]:
+        results_utils.save_results(results, args["name"])
 
 
 
