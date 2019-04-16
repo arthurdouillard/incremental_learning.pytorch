@@ -91,7 +91,14 @@ class IncrementalDataset(torch.utils.data.Dataset):
         idxes = np.where(np.isin(self._targets, classes))[0]
 
         self._mapping = {fake_idx: real_idx for fake_idx, real_idx in enumerate(idxes)}
-        if len(self._memory_idxes) > 0 and low != high:
+        if low != high - 1:
+            self._update_memory_mapping()
+
+    def set_idxes(self, idxes):
+        self._mapping = {fake_idx: real_idx for fake_idx, real_idx in enumerate(idxes)}
+
+    def _update_memory_mapping(self):
+        if len(self._memory_idxes):
             examplars_mapping = {
                 fake_idx: real_idx
                 for fake_idx, real_idx in zip(
@@ -106,7 +113,6 @@ class IncrementalDataset(torch.utils.data.Dataset):
     def set_memory(self, idxes):
         print("Setting {} memory examplars.".format(len(idxes)))
         self._memory_idxes = idxes
-
 
     def get_true_index(self, fake_idx):
         return self._mapping[fake_idx]

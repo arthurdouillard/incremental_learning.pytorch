@@ -81,12 +81,14 @@ class ICarl(IncrementalLearner):
         val_loss = 0.
         for epoch in prog_bar:
             _clf_loss, _distil_loss = 0., 0.
+            c = 0
 
             self._scheduler.step()
 
             for idx, (idxes, inputs, targets) in enumerate(train_loader, start=1):
                 self._optimizer.zero_grad()
 
+                c += len(idxes)
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 targets = utils.to_onehot(targets, self._n_classes).to(self._device)
                 logits = self.forward(inputs)
@@ -120,8 +122,8 @@ class ICarl(IncrementalLearner):
                 val_loss = self._compute_val_loss(val_loader)
             prog_bar.set_description(
             "Clf loss: {}; Distill loss: {}; Val loss: {}".format(
-                round(clf_loss.item(), 3),
-                round(distil_loss.item(), 3),
+                round(_clf_loss / c, 3),
+                round(_distil_loss / c, 3),
                 round(val_loss, 2)
             ))
 
@@ -250,21 +252,23 @@ class ICarl(IncrementalLearner):
 
     def _extract_features(self, loader):
         features = []
+        idxes = []
 
-        for _, inputs, _ in loader:
+        for (real_idxes, _), inputs, _ in loader:
             inputs = inputs.to(self._device)
             features.append(self._features_extractor(inputs).detach())
+            idxes.extend(real_idxes.numpy().tolist())
 
         features = torch.cat(features)
         mean = torch.mean(features, dim=0, keepdim=True)
 
-        return F.normalize(features), F.normalize(mean)[0]
+        return F.normalize(features), F.normalize(mean)[0], idxes
 
     @staticmethod
-    def _remove_row(matrix, row_idx):
-        tmp = torch.cat((matrix[:row_idx, ...], matrix[row_idx + 1 :, ...]))
+    def _remove_row(matrix, idxes, row_idx):
+        new_matrix = torch.cat((matrix[:row_idx, ...], matrix[row_idx + 1 :, ...]))
         del matrix
-        return tmp
+        return new_matrix, idxes[:row_idx] + idxes[row_idx + 1:]
 
     @staticmethod
     def _get_closest(centers, features):
@@ -283,37 +287,37 @@ class ICarl(IncrementalLearner):
         return distances.argmin().item()
 
     def _build_examplars(self, loader):
-        examplars_means = []
+        means = []
 
-        self.eval()
+        print("Updating examplars for classes {} -> {}.".format(
+            0, self._task * self._task_size))
+        for class_idx in range(0, self._task * self._task_size):
+            loader.dataset.set_idxes(self._examplars[class_idx])
+            _, examplar_mean, _ = self._extract_features(loader)
+            means.append(F.normalize(examplar_mean, dim=0))
+
         print("Building examplars for classes {} -> {}.".format(
             self._task * self._task_size, self._n_classes))
         for class_idx in range(self._task * self._task_size, self._n_classes):
-            examplars = []
+            examplars_idxes = []
 
             loader.dataset.set_classes_range(class_idx, class_idx)
 
-            features, class_mean = self._extract_features(loader)
+            features, class_mean, idxes = self._extract_features(loader)
             examplars_mean = torch.zeros(self._features_extractor.out_dim, device=self._device)
 
             for i in range(min(self._m, features.shape[0])):
                 idx = self._get_closest_features(
                     class_mean, (features + examplars_mean) / (i + 1)
                 )
-                examplars.append(loader.dataset.get_true_index(idx))
+                examplars_idxes.append(idxes[idx])
                 examplars_mean += features[idx]
-                features = self._remove_row(features, idx)
+                features, idxes = self._remove_row(features, idxes, idx)
 
-            examplars_means.append(examplars_mean / len(examplars))
-            self._examplars[class_idx] = examplars
+            means.append(F.normalize(examplars_mean / len(examplars_idxes), dim=0))
+            self._examplars[class_idx] = examplars_idxes
 
-        if self._means is None:
-            self._means = torch.stack(examplars_means)
-        else:
-            self._means = torch.cat([self._means, torch.stack(examplars_means)])
-        self._means = F.normalize(self._means)
-
-        self.train()
+        self._means = torch.stack(means)
 
     @property
     def examplars(self):
@@ -326,5 +330,6 @@ class ICarl(IncrementalLearner):
         )
 
     def _reduce_examplars(self):
+        print("Reducing examplars.")
         for class_idx in range(len(self._examplars)):
             self._examplars[class_idx] = self._examplars[class_idx][: self._m]
