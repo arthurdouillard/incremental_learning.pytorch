@@ -121,7 +121,7 @@ class ICarl(IncrementalLearner):
             if val_loader is not None:
                 val_loss = self._compute_val_loss(val_loader)
             prog_bar.set_description(
-            "Clf loss: {}; Distill loss: {}; Val loss: {}".format(
+                "Clf loss: {}; Distill loss: {}; Val loss: {}".format(
                 round(_clf_loss / c, 3),
                 round(_distil_loss / c, 3),
                 round(val_loss, 2)
@@ -192,7 +192,6 @@ class ICarl(IncrementalLearner):
 
         return clf_loss, distil_loss
 
-
     def _compute_predictions(self, data_loader):
         preds = torch.zeros(self._n_train_data, self._n_classes, device=self._device)
 
@@ -203,7 +202,6 @@ class ICarl(IncrementalLearner):
             preds[idxes] = self.forward(inputs).detach()
 
         return torch.sigmoid(preds)
-
 
     def _classify(self, data_loader):
         if self._means is None:
@@ -266,7 +264,7 @@ class ICarl(IncrementalLearner):
 
     @staticmethod
     def _remove_row(matrix, idxes, row_idx):
-        new_matrix = torch.cat((matrix[:row_idx, ...], matrix[row_idx + 1 :, ...]))
+        new_matrix = torch.cat((matrix[:row_idx, ...], matrix[row_idx + 1:, ...]))
         del matrix
         return new_matrix, idxes[:row_idx] + idxes[row_idx + 1:]
 
@@ -289,16 +287,16 @@ class ICarl(IncrementalLearner):
     def _build_examplars(self, loader):
         means = []
 
-        print("Updating examplars for classes {} -> {}.".format(
-            0, self._task * self._task_size))
-        for class_idx in range(0, self._task * self._task_size):
+        lo, hi = 0, self._task * self._task_size
+        print("Updating examplars for classes {} -> {}.".format(lo, hi))
+        for class_idx in range(lo, hi):
             loader.dataset.set_idxes(self._examplars[class_idx])
             _, examplar_mean, _ = self._extract_features(loader)
             means.append(F.normalize(examplar_mean, dim=0))
 
-        print("Building examplars for classes {} -> {}.".format(
-            self._task * self._task_size, self._n_classes))
-        for class_idx in range(self._task * self._task_size, self._n_classes):
+        lo, hi = self._task * self._task_size, self._n_classes
+        print("Building examplars for classes {} -> {}.".format(lo, hi))
+        for class_idx in range(lo, hi):
             examplars_idxes = []
 
             loader.dataset.set_classes_range(class_idx, class_idx)

@@ -5,7 +5,7 @@ def get_parser():
     # yapf: disable
 
     parser = argparse.ArgumentParser("IncLearner",
-                                    description="Incremental Learning trainer.")
+                                     description="Incremental Learning trainer.")
 
     # Model related:
     parser.add_argument("-m", "--model", default="icarl", type=str,

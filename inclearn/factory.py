@@ -8,7 +8,7 @@ def get_optimizer(params, optimizer, lr, weight_decay=0.0):
     if optimizer == "adam":
         return optim.Adam(params, lr=lr, weight_decay=weight_decay)
     elif optimizer == "sgd":
-        return optim.SGD(params, lr=lr, weight_decay=weight_decay)
+        return optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.9)
 
     raise NotImplementedError
 

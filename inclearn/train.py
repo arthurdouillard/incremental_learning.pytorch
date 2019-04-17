@@ -55,7 +55,6 @@ def train(args):
         results_utils.save_results(results, args["name"])
 
 
-
 def _set_seed(seed):
     print("Set seed", seed)
     random.seed(seed)
