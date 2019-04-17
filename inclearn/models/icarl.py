@@ -29,8 +29,10 @@ class ICarl(IncrementalLearner):
         self._k = args["memory_size"]
         self._n_classes = args["increment"]
 
-        self._features_extractor = factory.get_resnet(args["convnet"], nf=32)
-        self._classifier = nn.Linear(self._features_extractor.out_dim, self._n_classes, bias=True)
+        self._features_extractor = factory.get_resnet(args["convnet"], nf=64,
+                                                      zero_init_residual=True)
+        self._classifier = nn.Linear(self._features_extractor.out_dim, self._n_classes, bias=False)
+        torch.nn.init.kaiming_normal_(self._classifier.weight)
 
         self._examplars = {}
         self._means = None
@@ -122,9 +124,9 @@ class ICarl(IncrementalLearner):
                 val_loss = self._compute_val_loss(val_loader)
             prog_bar.set_description(
                 "Clf loss: {}; Distill loss: {}; Val loss: {}".format(
-                round(_clf_loss / c, 3),
-                round(_distil_loss / c, 3),
-                round(val_loss, 2)
+                    round(_clf_loss / c, 3),
+                    round(_distil_loss / c, 3),
+                    round(val_loss, 2)
             ))
 
 
@@ -236,15 +238,16 @@ class ICarl(IncrementalLearner):
         self._n_classes += n
 
         weight = self._classifier.weight.data
-        bias = self._classifier.bias.data
+        # bias = self._classifier.bias.data
 
         self._classifier = nn.Linear(
             self._features_extractor.out_dim, self._n_classes,
-            bias=True
+            bias=False
         ).to(self._device)
+        torch.nn.init.kaiming_normal_(self._classifier.weight)
 
         self._classifier.weight.data[: self._n_classes - n] = weight
-        self._classifier.bias.data[: self._n_classes - n] = bias
+        # self._classifier.bias.data[: self._n_classes - n] = bias
 
         print("Now {} examplars per class.".format(self._m))
 
