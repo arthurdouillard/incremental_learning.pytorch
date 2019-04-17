@@ -32,6 +32,8 @@ def get_parser():
                         help="Validation split (0. <= x <= 1.).")
     parser.add_argument("-random", "--random-classes", action="store_true", default=False,
                         help="Randomize classes order of increment")
+    parser.add_argument("-max-task", "--max-task", default=None, type=int,
+                        help="Cap the number of tasks.")
 
     # Training related:
     parser.add_argument("-lr", "--lr", default=0.001, type=float,

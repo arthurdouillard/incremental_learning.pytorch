@@ -22,6 +22,9 @@ def train(args):
     results = results_utils.get_template_results(args)
 
     for task in range(0, train_set.total_n_classes // args["increment"]):
+        if args["max_task"] == task:
+            break
+
         # Setting current task's classes:
 
         train_set.set_classes_range(low=task * args["increment"],
