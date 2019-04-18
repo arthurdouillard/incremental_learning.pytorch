@@ -87,7 +87,7 @@ class ICarl(IncrementalLearner):
 
             self._scheduler.step()
 
-            for idx, (idxes, inputs, targets) in enumerate(train_loader, start=1):
+            for i, ((_, idxes), inputs, targets) in enumerate(train_loader, start=1):
                 self._optimizer.zero_grad()
 
                 c += len(idxes)
@@ -98,7 +98,7 @@ class ICarl(IncrementalLearner):
                 clf_loss, distil_loss = self._compute_loss(
                     logits,
                     targets,
-                    idxes[1],
+                    idxes,
                 )
 
                 if not utils._check_loss(clf_loss) or not utils._check_loss(distil_loss):
@@ -112,7 +112,7 @@ class ICarl(IncrementalLearner):
                 _clf_loss += clf_loss.item()
                 _distil_loss += distil_loss.item()
 
-                if idx % 10 == 0 or idx >= len(train_loader):
+                if i % 10 == 0 or i >= len(train_loader):
                     prog_bar.set_description(
                     "Clf loss: {}; Distill loss: {}; Val loss: {}".format(
                         round(clf_loss.item(), 3),
@@ -128,8 +128,6 @@ class ICarl(IncrementalLearner):
                     round(_distil_loss / c, 3),
                     round(val_loss, 2)
             ))
-
-
 
     def _after_task(self, data_loader):
         self._reduce_examplars()
@@ -189,7 +187,7 @@ class ICarl(IncrementalLearner):
             previous_preds = self._previous_preds if train else self._previous_preds_val
             distil_loss = self._distil_loss(
                 logits[..., :self._new_task_index],
-                previous_preds[idxes, :self._new_task_index]
+                previous_preds[idxes]
             )
 
         return clf_loss, distil_loss
@@ -211,7 +209,7 @@ class ICarl(IncrementalLearner):
                              " Have you forgotten to call `before_task`?")
         if self._means.shape[0] != self._n_classes:
             raise ValueError(
-                "The number of examplar means ({}) is inconsistent".format(self._means.shape[0])+\
+                "The number of examplar means ({}) is inconsistent".format(self._means.shape[0]) +
                 " with the number of classes ({}).".format(self._n_classes))
 
         ypred = []
@@ -221,7 +219,7 @@ class ICarl(IncrementalLearner):
             inputs = inputs.to(self._device)
 
             features = self._features_extractor(inputs).detach()
-            preds = self._get_closest(self._means, features)
+            preds = self._get_closest(self._means, F.normalize(features))
 
             ypred.extend(preds)
             ytrue.extend(targets)
@@ -261,9 +259,9 @@ class ICarl(IncrementalLearner):
             idxes.extend(real_idxes.numpy().tolist())
 
         features = torch.cat(features)
-        mean = torch.mean(features, dim=0, keepdim=True)
+        mean = torch.mean(features, dim=0, keepdim=False)
 
-        return F.normalize(features), F.normalize(mean)[0], idxes
+        return features, mean, idxes
 
     @staticmethod
     def _remove_row(matrix, idxes, row_idx):
@@ -275,17 +273,21 @@ class ICarl(IncrementalLearner):
     def _get_closest(centers, features):
         pred_labels = []
 
+        features = features
         for feature in features:
-            distances = torch.pow(centers - feature, 2).sum(-1)
+            distances = ICarl._dist(centers, feature)
             pred_labels.append(distances.argmin().item())
 
         return np.array(pred_labels)
 
     @staticmethod
     def _get_closest_features(center, features):
-        normalized_features = F.normalize(features)
-        distances = torch.pow(center - normalized_features, 2).sum(-1)
+        distances = ICarl._dist(center, features)
         return distances.argmin().item()
+
+    @staticmethod
+    def _dist(a, b):
+        return torch.pow(a - b, 2).sum(-1)
 
     def _build_examplars(self, loader):
         means = []
@@ -307,13 +309,24 @@ class ICarl(IncrementalLearner):
             features, class_mean, idxes = self._extract_features(loader)
             examplars_mean = torch.zeros(self._features_extractor.out_dim, device=self._device)
 
+            class_mean = F.normalize(class_mean, dim=0)
+
             for i in range(min(self._m, features.shape[0])):
-                idx = self._get_closest_features(
-                    class_mean, (features + examplars_mean) / (i + 1)
+                tmp = F.normalize(
+                    (features + examplars_mean) / (i + 1),
+                    dim=0
                 )
-                examplars_idxes.append(idxes[idx])
-                examplars_mean += features[idx]
-                features, idxes = self._remove_row(features, idxes, idx)
+                distances = (class_mean - tmp).norm(2, 1)
+                idxes_winner = distances.argsort().cpu().numpy()
+
+                for idx in idxes_winner:
+                    real_idx = idxes[idx]
+                    if real_idx in examplars_idxes:
+                        continue
+
+                    examplars_idxes.append(real_idx)
+                    examplars_mean += features[idx]
+                    break
 
             means.append(F.normalize(examplars_mean / len(examplars_idxes), dim=0))
             self._examplars[class_idx] = examplars_idxes
