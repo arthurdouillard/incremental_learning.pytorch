@@ -19,8 +19,3 @@ following figure:
 My experiments are in green, with their means & standard deviations plotted.
 They were runned 40 times, with seed going from 1 to 40, each producing a
 different classes ordering.
-
-It seems that the mean is consistently lower by 10pts compared to iCaRL's paper
-results. I guess it means something is wrong during the training & not simply
-due to the distillation loss or the examplars selection because we can see this
-loss from the first task.
