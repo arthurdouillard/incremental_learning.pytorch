@@ -18,6 +18,8 @@ def get_parser():
                         help="Method to gather previous tasks' examples.")
     parser.add_argument("-memory", "--memory-size", default=2000, type=int,
                         help="Max number of storable examplars.")
+    parser.add_argument("-temp", "--temperature", default=1, type=int,
+                        help="Temperature used to soften the predictions.")
 
     # Data related:
     parser.add_argument("-d", "--dataset", default="iCIFAR100", type=str,
@@ -36,15 +38,15 @@ def get_parser():
                         help="Cap the number of tasks.")
 
     # Training related:
-    parser.add_argument("-lr", "--lr", default=0.001, type=float,
+    parser.add_argument("-lr", "--lr", default=2., type=float,
                         help="Learning rate.")
     parser.add_argument("-wd", "--weight-decay", default=0.00001, type=float,
                         help="Weight decay.")
-    parser.add_argument("-sc", "--scheduling", default=[], nargs="*", type=int,
+    parser.add_argument("-sc", "--scheduling", default=[50, 64], nargs="*", type=int,
                         help="Epoch step where to reduce the learning rate.")
     parser.add_argument("-lr-decay", "--lr-decay", default=1/5, type=int,
                         help="LR multiplied by it.")
-    parser.add_argument("-opt", "--optimizer", default="adam", type=str,
+    parser.add_argument("-opt", "--optimizer", default="sgd", type=str,
                         help="Optimizer to use.")
     parser.add_argument("-e", "--epochs", default=70, type=int,
                         help="Number of epochs per task.")

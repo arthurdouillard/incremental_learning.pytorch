@@ -43,11 +43,9 @@ def train(args):
         model.train_task(train_loader, val_loader)
         model.after_task(train_loader)
 
-        train_set.set_classes_range(high=(task + 1) * args["increment"])
-        test_set.set_classes_range(high=(task + 1) * args["increment"])
-
+        print(test_loader.dataset._low_range, test_loader.dataset._high_range)
         ypred, ytrue = model.eval_task(test_loader)
-        acc_stats = utils.compute_accuracy(ypred, ytrue)
+        acc_stats = utils.compute_accuracy(ypred, ytrue, task_size=args["increment"])
         print(acc_stats)
         results["results"].append(acc_stats)
 

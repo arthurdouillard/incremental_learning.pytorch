@@ -62,6 +62,9 @@ class IncrementalLearner(abc.ABC, nn.Module):
     def _after_task(self, data_loader):
         pass
 
+    def _eval_task(self, data_loader):
+        raise NotImplementedError
+
     @property
     def _new_task_index(self):
         return self._task * self._task_size
