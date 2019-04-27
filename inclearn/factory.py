@@ -25,8 +25,12 @@ def get_resnet(resnet_type, **kwargs):
 def get_model(args):
     if args["model"] == "icarl":
         return models.ICarl(args)
+    elif args["model"] == "lwf":
+        return models.LwF(args)
+    elif args["model"] == "e2e":
+        return models.End2End(args)
 
-    raise NotImplementedError(arg["model"])
+    raise NotImplementedError(args["model"])
 
 
 def get_data(args, train=True, classes_order=None):
@@ -39,12 +43,11 @@ def get_data(args, train=True, classes_order=None):
     else:
         raise NotImplementedError(dataset_name)
 
-    return dataset(
-        increment=args["increment"],
-        train=train,
-        randomize_class=args["random_classes"],
-        classes_order=classes_order
-    )
+    return dataset(increment=args["increment"],
+                   train=train,
+                   randomize_class=args["random_classes"],
+                   classes_order=classes_order)
+
 
 def set_device(args):
     device_type = args["device"]
