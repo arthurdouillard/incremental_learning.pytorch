@@ -11,13 +11,17 @@ from inclearn.models.base import IncrementalLearner
 class ICarl(IncrementalLearner):
     """Implementation of iCarl.
 
+    # References:
+    - iCaRL: Incremental Classifier and Representation Learning
+      Sylvestre-Alvise Rebuffi, Alexander Kolesnikov, Georg Sperl, Christoph H. Lampert
+      https://arxiv.org/abs/1611.07725
+
     :param args: An argparse parsed arguments object.
     """
     def __init__(self, args):
         super().__init__()
 
         self._device = args["device"]
-        self._memory_size = args["memory_size"]
         self._opt_name = args["optimizer"]
         self._lr = args["lr"]
         self._weight_decay = args["weight_decay"]
@@ -76,6 +80,9 @@ class ICarl(IncrementalLearner):
         )
 
     def _train_task(self, train_loader, val_loader):
+        for p in self.parameters():
+            p.register_hook(lambda grad: torch.clamp(grad, -5, 5))
+
         print("nb ", len(train_loader.dataset))
 
         prog_bar = trange(self._n_epochs, desc="Losses.")
@@ -187,7 +194,7 @@ class ICarl(IncrementalLearner):
             previous_preds = self._previous_preds if train else self._previous_preds_val
             distil_loss = self._distil_loss(
                 logits[..., :self._new_task_index],
-                previous_preds[idxes]
+                previous_preds[idxes, :self._new_task_index]
             )
 
         return clf_loss, distil_loss
@@ -232,20 +239,16 @@ class ICarl(IncrementalLearner):
         return self._k // self._n_classes
 
     def _add_n_classes(self, n):
-        print("add n classes")
         self._n_classes += n
 
-        weight = self._classifier.weight.data
-        # bias = self._classifier.bias.data
-
+        weights = self._classifier.weight.data
         self._classifier = nn.Linear(
             self._features_extractor.out_dim, self._n_classes,
             bias=False
         ).to(self._device)
         torch.nn.init.kaiming_normal_(self._classifier.weight)
 
-        self._classifier.weight.data[: self._n_classes - n] = weight
-        # self._classifier.bias.data[: self._n_classes - n] = bias
+        self._classifier.weight.data[: self._n_classes - n] = weights
 
         print("Now {} examplars per class.".format(self._m))
 
@@ -258,7 +261,7 @@ class ICarl(IncrementalLearner):
             features.append(self._features_extractor(inputs).detach())
             idxes.extend(real_idxes.numpy().tolist())
 
-        features = torch.cat(features)
+        features = F.normalize(torch.cat(features), dim=1)
         mean = torch.mean(features, dim=0, keepdim=False)
 
         return features, mean, idxes
@@ -314,9 +317,9 @@ class ICarl(IncrementalLearner):
             for i in range(min(self._m, features.shape[0])):
                 tmp = F.normalize(
                     (features + examplars_mean) / (i + 1),
-                    dim=0
+                    dim=1
                 )
-                distances = (class_mean - tmp).norm(2, 1)
+                distances = self._dist(class_mean, tmp)
                 idxes_winner = distances.argsort().cpu().numpy()
 
                 for idx in idxes_winner:
