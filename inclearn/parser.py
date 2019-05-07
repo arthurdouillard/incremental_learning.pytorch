@@ -56,7 +56,9 @@ def get_parser():
                         help="GPU index to use, for cpu use -1.")
     parser.add_argument("--name", default="exp",
                         help="Experience name")
-    parser.add_argument("-seed", "--seed", default=1, type=int,
+    parser.add_argument("-seed", "--seed", default=[1], type=int, nargs="+",
                         help="Random seed.")
+    parser.add_argument("-seed-range", "--seed-range", type=int, nargs=2,
+                        help="Seed range going from first number to second (both included).")
 
     return parser

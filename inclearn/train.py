@@ -1,3 +1,4 @@
+import copy
 import random
 
 import numpy as np
@@ -7,6 +8,13 @@ from inclearn import factory, results_utils, utils
 
 
 def train(args):
+    seed_list = copy.deepcopy(args["seed"])
+    for seed in seed_list:
+        args["seed"] = seed
+        _train(args)
+
+
+def _train(args):
     _set_seed(args["seed"])
 
     factory.set_device(args)
@@ -16,6 +24,7 @@ def train(args):
 
     train_loader, val_loader = train_set.get_loader(args["validation"])
     test_loader, _ = test_set.get_loader()
+    #val_loader = test_loader
 
     model = factory.get_model(args)
 
@@ -26,7 +35,6 @@ def train(args):
             break
 
         # Setting current task's classes:
-
         train_set.set_classes_range(low=task * args["increment"],
                                     high=(task + 1) * args["increment"])
         test_set.set_classes_range(high=(task + 1) * args["increment"])
@@ -40,10 +48,10 @@ def train(args):
         )
 
         model.before_task(train_loader, val_loader)
+        print("train", task * args["increment"], (task + 1) * args["increment"])
         model.train_task(train_loader, val_loader)
         model.after_task(train_loader)
 
-        print(test_loader.dataset._low_range, test_loader.dataset._high_range)
         ypred, ytrue = model.eval_task(test_loader)
         acc_stats = utils.compute_accuracy(ypred, ytrue, task_size=args["increment"])
         print(acc_stats)
