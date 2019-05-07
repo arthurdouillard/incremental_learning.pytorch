@@ -15,10 +15,18 @@ def get_template_results(args):
 
 def save_results(results, label):
     del results["config"]["device"]
-    file_path = "{}_{}.json".format(utils.get_date(), label)
-    with open(os.path.join("results", file_path), "w+") as f:
-        json.dump(results, f)
 
+    folder_path = os.path.join("results", label)
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+
+    file_path = "{date}_{label}_{seed}.json".format(
+        date=utils.get_date(),
+        label=label,
+        seed=results["config"]["seed"]
+    )
+    with open(os.path.join(folder_path, file_path), "w+") as f:
+        json.dump(results, f)
 
 
 def plot(paths, save_path=None):
