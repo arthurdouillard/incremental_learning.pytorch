@@ -25,7 +25,7 @@ Every experiments have been runned at least 20 times, each with a different clas
 ordering. The class ordering is defined by random using a different seed. I'm
 using the seed from 1 to 20.
 
-````
+```bash
 python3 inclearn --model <model> --seed-range 1 20 --name <exp_name> <other options>
 ```
 
