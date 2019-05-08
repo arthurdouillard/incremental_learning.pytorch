@@ -139,7 +139,8 @@ def plot(results, increment, total, title="", path_to_save=None):
 
         unique_score = compute_unique_score(means, skip_first=skip_first)
 
-        plt.errorbar(x, means, stds, label=label + " ({})".format(unique_score))
+        plt.errorbar(x, means, stds, label=label + " ({})".format(unique_score),
+                     marker="o", markersize=3)
 
     plt.legend(loc="upper right")
     plt.xlabel("Number of classes")
