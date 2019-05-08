@@ -1,4 +1,6 @@
+import glob
 import json
+import math
 import os
 
 import matplotlib.pyplot as plt
@@ -7,10 +9,7 @@ from inclearn import utils
 
 
 def get_template_results(args):
-    return {
-        "config": args,
-        "results": []
-    }
+    return {"config": args, "results": []}
 
 
 def save_results(results, label):
@@ -21,53 +20,137 @@ def save_results(results, label):
         os.makedirs(folder_path)
 
     file_path = "{date}_{label}_{seed}.json".format(
-        date=utils.get_date(),
-        label=label,
-        seed=results["config"]["seed"]
+        date=utils.get_date(), label=label, seed=results["config"]["seed"]
     )
     with open(os.path.join(folder_path, file_path), "w+") as f:
         json.dump(results, f)
 
 
-def plot(paths, save_path=None):
+def extract(paths, avg_inc=False):
+    """Extract accuracy logged in the various log files.
+
+    :param paths: A path or a list of paths to a json file.
+    :param avg_inc: Boolean specifying whether to use the accuracy or the average
+                    incremental accuracy as defined in iCaRL.
+    :return: A list of runs. Each runs is a list of (average incremental) accuracies.
+    """
+    if not isinstance(paths, list):
+        paths = [paths]
+
+    runs_accs = []
+    for path in paths:
+        with open(path) as f:
+            data = json.load(f)
+
+        accs = [100 * task["total"] for task in data["results"]]
+
+        if avg_inc:
+            accs = compute_avg_inc_acc(accs)
+
+        runs_accs.append(accs)
+
+    return runs_accs
+
+
+def compute_avg_inc_acc(accs):
+    """Computes the average incremental accuracy as defined in iCaRL.
+
+    The average incremental accuracies at task X are the average of accuracies
+    at task 0, 1, ..., and X.
+
+    :param accs: A list of accuracies.
+    :return: A list of average incremental accuracies.
+    """
+    avg_inc_accs = []
+
+    for i in range(len(accs)):
+        sub_accs = [accs[j] for j in range(0, i + 1)]
+        avg_inc_accs.append(sum(sub_accs) / len(sub_accs))
+
+    return avg_inc_accs
+
+
+def aggregate(runs_accs):
+    """Aggregate results of several runs into means & standard deviations.
+
+    :param runs_accs: A list of runs. Each runs is a list of (average
+                      incremental) accuracies.
+    :return: A list of means, and a list of standard deviations.
+    """
+    means = []
+    stds = []
+
+    n_runs = len(runs_accs)
+    for i in range(len(runs_accs[0])):
+        ith_value = [runs_accs[j][i] for j in range(n_runs)]
+
+        mean = sum(ith_value) / n_runs
+        std = math.sqrt(sum(math.pow(mean - i, 2) for i in ith_value) / n_runs)
+
+        means.append(mean)
+        stds.append(std)
+
+    return means, stds
+
+
+def compute_unique_score(means, skip_first=False):
+    """Computes the average of the (average incremental) accuracies to get a
+    unique score.
+
+    :param means: A list of mean accuracies over several runs.
+    :param skip_first: Whether to skip the first task accuracy as advised in
+                       End-to-End Incremental Accuracy.
+    :return: A unique score being the average of the (average incremental)
+             accuracies.
+    """
+    start = int(skip_first)
+    sub_means = [means[i] for i in range(start, len(means))]
+
+    return round(sum(sub_means) / len(sub_means), 2)
+
+
+def plot(results, increment, total, title="", path_to_save=None):
+    """Plotting utilities to visualize several experiments.
+
+    :param results: A list of dict composed of a "path", a "label", an optional
+                    "average incremental", an optional "skip_first".
+    :param increment: The increment of classes per task.
+    :param total: The total number of classes.
+    :param title: Plot title.
+    :param path_to_save: Optional path where to save the image.
+    """
     plt.figure(figsize=(10, 5))
 
-    for path in paths:
-        label = path.split("/")[-1].split(".")[0]
-        x, y = _extract(path)
+    x = list(range(increment, total + 1, increment))
 
-        plt.plot(x, y, label=label)
+    for result in results:
+        path = result["path"]
+        label = result["label"]
+        avg_inc = result.get("average_incremental", False)
+        skip_first = result.get("skip_first", False)
+
+        if "*" in path:
+            path = glob.glob(path)
+        elif os.path.isdir(path):
+            path = glob.glob(os.path.join(path, "*.json"))
+
+        runs_accs = extract(path, avg_inc=avg_inc)
+        means, stds = aggregate(runs_accs)
+
+        unique_score = compute_unique_score(means, skip_first=skip_first)
+
+        plt.errorbar(x, means, stds, label=label + " ({})".format(unique_score))
+
     plt.legend(loc="upper right")
     plt.xlabel("Number of classes")
-    plt.ylabel("Accuracy")
+    plt.ylabel("Average Incremental Accuracy")
+    plt.title(title)
 
-    for i in range(10, 101, 10):
+    for i in range(10, total + 1, 10):
         plt.axhline(y=i, color='black', linestyle='dashed', linewidth=1, alpha=0.2)
-    plt.yticks([i for i in range(10, 101, 10)])
-    plt.xticks([i for i in range(10, len(x) * 10 + 1, 10)])
+    plt.yticks([i for i in range(10, total + 1, 10)])
+    plt.xticks([i for i in range(10, len(x) * increment + 1, 10)])
 
-    if save_path:
-        plt.savefig(save_path)
-    else:
-        plt.show()
-
-
-# -----
-
-def _sorting(x):
-    if x != "total":
-        return x.split("-")[1]
-    return x
-
-def _get_number_of_classes(task):
-    max_task = sorted(task.keys(), key=lambda x: _sorting(x), reverse=True)[1]
-    return int(max_task.split("-")[1]) + 1
-
-def _extract(path):
-    with open(path) as f:
-        stats = json.load(f)
-
-    x = [_get_number_of_classes(task) for task in stats]
-    y = [100 * task["total"] for task in stats]
-
-    return x, y
+    if path_to_save:
+        plt.savefig(path_to_save)
+    plt.show()
