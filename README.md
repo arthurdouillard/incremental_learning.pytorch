@@ -10,35 +10,42 @@ Every model must inherit `inclearn.models.base.IncrementalLearner`.
 
 ## Papers implemented:
 
-:white_check_mark: --> Paper implemented & reached expected results.\
+:white_check_mark: --> Paper implemented & reached expected (or more) results.\
 :construction: --> Runnable but not yet reached expected results.\
-:x: --> Not yet implemented or barely working.\
+:x: --> Not yet implemented or barely working.
 
-[1]: :construction: iCaRL\
-[2]: :construction: LwF\
-[3]: :construction: End-to-End Incremental Learning\
+:white_check_mark: iCaRL\
+:construction: Learning without Forgetting (LwF)\
+:white_check_mark: End-to-End Incremental Learning (E2E)
+:x: Overcoming catastrophic forgetting (EWC)
+
+## Results
+
+Every experiments have been runned at least 20 times, each with a different class
+ordering. The class ordering is defined by random using a different seed. I'm
+using the seed from 1 to 20.
+
+````
+python3 inclearn --model <model> --seed-range 1 20 --name <exp_name> <other options>
+```
+
+The metric used is what iCaRL defined the `average incremental accuracy`. It's
+what is plotted on every graph. In addition the in-parenthesis metric is the
+average of those average incremental accuracy. You can see in the notebook
+[here](results.ipynb) how it is done.
+
+I'll always precise whether the results are from a paper `[paper]` or myself `[me]`.
 
 
-## iCaRL
+### iCIFAR100, 10-split
 
-![icarl](figures/icarl.png)
+![icifar100, 10 split](figures/icifar100_10split.png)
 
-My experiments are in green, with their means & standard deviations plotted.
-They were runned 40 times, with seed going from 1 to 40, each producing a
-different classes ordering.
+### iCIFAR100, 2-split
 
-The metric used is the `average incremental accuracy`:
+TODO
 
-> The result of the evaluation are curves of the classification accuracies after
-> each batch of classes. If a single number is preferable, we report the average of
-> these accuracies, called average incremental accuracy.
 
-~If I understood well, the accuracy at task i (computed on all seen tasks) is averaged~
-~with all previous accuracy. A bit weird, but doing so get me a curve very similar~
-~to what the papier displayed.~
+## TODO
 
-EDIT: I've plot on the curve the "average incremental accuracy" but I'm not sure
-if the authors plot this metrics or simply used it in the tables results. Thus I'm
-not sure of my results validity.
-
----
+- [ ] Add subparser per paper
