@@ -136,7 +136,8 @@ class iCIFAR10(IncrementalDataset):
     _base_dataset = datasets.cifar.CIFAR10
     _train_transforms = [
         transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip()
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=63 / 255)
     ]
     _common_transforms = [
         transforms.ToTensor(),
