@@ -5,6 +5,7 @@ from torch.nn import functional as F
 from tqdm import trange
 
 from inclearn import factory, utils
+from inclearn.lib import callbacks
 from inclearn.models.base import IncrementalLearner
 
 
@@ -29,16 +30,14 @@ class End2End(IncrementalLearner):
         self._k = args["memory_size"]
         self._n_classes = args["increment"]
 
-        self._temperature = args["temperature"]
+        self._temperature = 2.#args["temperature"]
 
         self._features_extractor = factory.get_resnet(
             args["convnet"], nf=64, zero_init_residual=True
         )
-        self._classifier = nn.Linear(self._features_extractor.out_dim, self._n_classes, bias=False)
-        torch.nn.init.kaiming_normal_(self._classifier.weight)
+        self._classifier = nn.Linear(self._features_extractor.out_dim, self._n_classes, bias=True)
 
         self._examplars = {}
-        self._means = None
 
         self.to(self._device)
 
@@ -65,28 +64,48 @@ class End2End(IncrementalLearner):
         else:
             print("Computing previous predictions...")
             self._previous_preds = self._compute_predictions(train_loader)
-            if val_loader:
-                self._previous_preds_val = self._compute_predictions(val_loader)
 
             self._add_n_classes(self._task_size)
 
     def _train_task(self, train_loader, val_loader):
+        """Train & fine-tune model.
+
+        The scheduling is different from the paper for one reason. In the paper,
+        End-to-End Incremental Learning, the authors pre-generated 12 augmentations
+        per images (thus multiplying by this number the dataset size). However
+        I find this inefficient for large scale datasets, thus I'm simply doing
+        the augmentations online. A greater number of epochs is then needed to
+        match performances.
+
+        :param train_loader: A DataLoader.
+        :param val_loader: A DataLoader, can be None.
+        """
         # Training on all new + examplars
-        self.foo = 0
-        optimizer = factory.get_optimizer(self.parameters(), self._opt_name, 0.1, 0.0001)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 20, 30], gamma=0.1)
-        self._train(train_loader, 1, optimizer, scheduler)
+        self._best_acc = float("-inf")
+
+        print("Training")
+        self._finetuning = False
+        optimizer = factory.get_optimizer(self.parameters(), self._opt_name, 0.1, 0.001)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 60], gamma=0.2)
+        self._train(train_loader, val_loader, 70, optimizer, scheduler)
 
         if self._task == 0:
+            print("best", self._best_acc)
             return
 
         # Fine-tuning on sub-set new + examplars
-        self._build_examplars(train_loader)
+        print("Fine-tuning")
+        self._finetuning = True
+        self._build_examplars(train_loader,
+                              n_examplars=self._k // (self._n_classes - self._task_size))
         train_loader.dataset.set_idxes(self.examplars)  # Fine-tuning only on balanced dataset
-        optimizer = factory.get_optimizer(self.parameters(), self._opt_name, 0.01, 0.0001)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 20], gamma=0.1)
-        self.foo = 1
-        self._train(train_loader, 1, optimizer, scheduler)
+        self._previous_preds = self._compute_predictions(train_loader)
+
+        optimizer = factory.get_optimizer(self.parameters(), self._opt_name, 0.01, 0.001)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [20, 40], gamma=0.2)
+        self._train(train_loader, val_loader, 50, optimizer, scheduler)
+
+        print("best", self._best_acc)
 
     def _after_task(self, data_loader):
         self._reduce_examplars()
@@ -105,12 +124,17 @@ class End2End(IncrementalLearner):
     # Private API
     # -----------
 
-    def _train(self, train_loader, n_epochs, optimizer, scheduler):
+    def _train(self, train_loader, val_loader, n_epochs, optimizer, scheduler):
         print("nb ", len(train_loader.dataset))
-
         prog_bar = trange(n_epochs, desc="Losses.")
 
+        val_acc = 0.
         for epoch in prog_bar:
+            if epoch % 10 == 0 and val_loader:
+                ypred, ytrue = self._classify(val_loader)
+                val_acc = (ypred == ytrue).sum() / len(ytrue)
+                self._best_acc = max(self._best_acc, val_acc)
+
             _clf_loss, _distil_loss = 0., 0.
             c = 0
 
@@ -143,14 +167,17 @@ class End2End(IncrementalLearner):
 
                 if i % 10 == 0 or i >= len(train_loader):
                     prog_bar.set_description(
-                        "Clf loss: {}; Distill loss: {}".format(
-                            round(clf_loss.item(), 3), round(distil_loss.item(), 3)
+                        "Clf loss: {}; Distill loss: {}; Val acc: {}".format(
+                            round(clf_loss.item(), 3), round(distil_loss.item(), 3),
+                            round(val_acc, 3)
                         )
                     )
 
+
             prog_bar.set_description(
-                "Clf loss: {}; Distill loss: {}".format(
-                    round(_clf_loss / c, 3), round(_distil_loss / c, 3)
+                "Clf loss: {}; Distill loss: {}; Val acc: {}".format(
+                    round(_clf_loss / c, 3), round(_distil_loss / c, 3),
+                    round(val_acc, 3)
                 )
             )
 
@@ -165,18 +192,17 @@ class End2End(IncrementalLearner):
                       match the previous predictions.
         :return: A tuple of the classification loss and the distillation loss.
         """
+        clf_loss = F.cross_entropy(logits, targets)
+
         if self._task == 0:
-            clf_loss = F.cross_entropy(logits, targets)
             distil_loss = torch.zeros(1, device=self._device)
         else:
-            # Disable the cross_entropy loss for the old targets:
-            for i in range(self._new_task_index):
-                targets[targets == i] = -1
-            clf_loss = F.cross_entropy(logits, targets, ignore_index=-1)
+            if not self._finetuning:
+                logits = logits[..., :self._new_task_index]
 
             distil_loss = F.binary_cross_entropy(
-                F.softmax(logits[..., :self._new_task_index] ** (1 / self._temperature), dim=1),
-                F.softmax(self._previous_preds[idxes]**(1 / self._temperature), dim=1)
+                F.softmax(logits / self._temperature, dim=1),
+                F.softmax(self._previous_preds[idxes] / self._temperature, dim=1)
             )
 
         return clf_loss, distil_loss
@@ -210,7 +236,7 @@ class End2End(IncrementalLearner):
         for _, inputs, targets in loader:
             inputs = inputs.to(self._device)
             logits = self.forward(inputs)
-            preds = F.softmax(logits, dim=1).argmax(dim=1)
+            preds = logits.argmax(dim=1).cpu().numpy()
 
             ypred.extend(preds)
             ytrue.extend(targets)
@@ -225,11 +251,9 @@ class End2End(IncrementalLearner):
     def _add_n_classes(self, n):
         self._n_classes += n
 
-        weights = self._classifier.weight.data
+        weights = self._classifier.weight.data.clone()
         self._classifier = nn.Linear(self._features_extractor.out_dim, self._n_classes,
-                                     bias=False).to(self._device)
-        torch.nn.init.kaiming_normal_(self._classifier.weight)
-
+                                     bias=True).to(self._device)
         self._classifier.weight.data[:self._n_classes - n] = weights
 
         print("Now {} examplars per class.".format(self._m))
@@ -276,31 +300,36 @@ class End2End(IncrementalLearner):
         """
         return torch.pow(a - b, 2).sum(-1)
 
-    def _build_examplars(self, loader):
+    def _build_examplars(self, loader, n_examplars=None):
         """Builds new examplars.
 
         :param loader: A DataLoader.
+        :param n_examplars: Maximum number of examplars to create.
         """
+        n_examplars = n_examplars or self._m
+
         lo, hi = self._task * self._task_size, self._n_classes
         print("Building examplars for classes {} -> {}.".format(lo, hi))
         for class_idx in range(lo, hi):
             loader.dataset.set_classes_range(class_idx, class_idx)
-            self._examplars[class_idx] = self._build_class_examplars(loader)
+            self._examplars[class_idx] = self._build_class_examplars(loader, n_examplars)
 
-    def _build_class_examplars(self, loader):
+    def _build_class_examplars(self, loader, n_examplars):
         """Build examplars for a single class.
 
         Examplars are selected as the closest to the class mean.
 
         :param loader: DataLoader that provides images for a single class.
+        :param n_examplars: Maximum number of examplars to create.
         :return: The real indexes of the chosen examplars.
         """
         features, class_mean, idxes = self._extract_features(loader)
 
         class_mean = F.normalize(class_mean, dim=0)
+        features = F.normalize(features, dim=1)
         distances_to_mean = self._dist(class_mean, features)
 
-        nb_examplars = min(self._m, len(features))
+        nb_examplars = min(n_examplars, len(features))
 
         fake_idxes = distances_to_mean.argsort().cpu().numpy()[:nb_examplars]
         return [idxes[idx] for idx in fake_idxes]
