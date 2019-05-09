@@ -93,20 +93,31 @@ def aggregate(runs_accs):
     return means, stds
 
 
-def compute_unique_score(means, skip_first=False):
+def compute_unique_score(runs_accs, skip_first=False):
     """Computes the average of the (average incremental) accuracies to get a
     unique score.
 
-    :param means: A list of mean accuracies over several runs.
+    :param runs_accs: A list of runs. Each runs is a list of (average
+                      incremental) accuracies.
     :param skip_first: Whether to skip the first task accuracy as advised in
                        End-to-End Incremental Accuracy.
     :return: A unique score being the average of the (average incremental)
-             accuracies.
+             accuracies, and a standard deviation.
     """
     start = int(skip_first)
-    sub_means = [means[i] for i in range(start, len(means))]
 
-    return round(sum(sub_means) / len(sub_means), 2)
+    means = []
+    for run in runs_accs:
+        means.append(sum(run[start:]) / len(run[start:]))
+
+    mean_of_mean = sum(means) / len(means)
+    if len(runs_accs) == 1:  # One run, probably a paper, don't compute std:
+        std = ""
+    else:
+        std = math.sqrt(sum(math.pow(mean_of_mean - i, 2) for i in means) / len(means))
+        std = " ± " + str(round(std, 2))
+
+    return str(round(mean_of_mean, 2)), std
 
 
 def plot(results, increment, total, title="", path_to_save=None):
@@ -137,9 +148,9 @@ def plot(results, increment, total, title="", path_to_save=None):
         runs_accs = extract(path, avg_inc=avg_inc)
         means, stds = aggregate(runs_accs)
 
-        unique_score = compute_unique_score(means, skip_first=skip_first)
+        unique_score, unique_std = compute_unique_score(runs_accs, skip_first=skip_first)
 
-        plt.errorbar(x, means, stds, label=label + " ({})".format(unique_score),
+        plt.errorbar(x, means, stds, label=label + " ({})".format(unique_score + unique_std),
                      marker="o", markersize=3)
 
     plt.legend(loc="upper right")
