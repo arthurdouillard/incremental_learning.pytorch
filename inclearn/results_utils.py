@@ -19,11 +19,9 @@ def save_results(results, label):
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
-    file_path = "{date}_{label}_{seed}.json".format(
-        date=utils.get_date(), label=label, seed=results["config"]["seed"]
-    )
+    file_path = "{}_{}_.json".format(utils.get_date(), results["config"]["seed"])
     with open(os.path.join(folder_path, file_path), "w+") as f:
-        json.dump(results, f)
+        json.dump(results, f, indent=2)
 
 
 def extract(paths, avg_inc=False):
