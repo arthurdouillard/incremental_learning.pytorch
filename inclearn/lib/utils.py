@@ -5,11 +5,13 @@ import torch
 
 
 def to_onehot(targets, n_classes):
-    return torch.eye(n_classes)[targets]
+    onehot = torch.zeros(targets.shape[0], n_classes).to(targets.device)
+    onehot.scatter_(dim=1, index=targets.long().view(-1, 1), value=1.)
+    return onehot
 
 
 def _check_loss(loss):
-    return not torch.isnan(loss) and loss >= 0.
+    return not bool(torch.isnan(loss).item()) and bool((loss >= 0.).item())
 
 
 def compute_accuracy(ypred, ytrue, task_size=10):

@@ -11,8 +11,11 @@ from inclearn.models.base import IncrementalLearner
 tqdm.monitor_interval = 0
 
 
-class End2End(IncrementalLearner):
-    """Implementation of End-to-End Increment Learning.
+class Medic(IncrementalLearner):
+    """Implementation of:
+
+    - Incremental Learning with Maximum Entropy Regularization: Rethinking
+      Forgetting and Intransigence.
 
     :param args: An argparse parsed arguments object.
     """
@@ -31,11 +34,11 @@ class End2End(IncrementalLearner):
 
         self._k = args["memory_size"]
         self._n_classes = 0
+        self._epochs = args["epochs"]
 
-        self._temperature = args["temperature"]
-
-        self._network = network.BasicNet(args["convnet"], use_bias=True, use_multi_fc=True,
-                                         device=self._device)
+        self._network = network.BasicNet(
+            args["convnet"], use_bias=True, use_multi_fc=False, device=self._device
+        )
 
         self._examplars = {}
         self._old_model = []
@@ -71,48 +74,20 @@ class End2End(IncrementalLearner):
     def _train_task(self, train_loader, val_loader):
         """Train & fine-tune model.
 
-        The scheduling is different from the paper for one reason. In the paper,
-        End-to-End Incremental Learning, the authors pre-generated 12 augmentations
-        per images (thus multiplying by this number the dataset size). However
-        I find this inefficient for large scale datasets, thus I'm simply doing
-        the augmentations online. A greater number of epochs is then needed to
-        match performances.
-
         :param train_loader: A DataLoader.
         :param val_loader: A DataLoader, can be None.
         """
-        if self._task == 0:
-            epochs = 90
-            optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.1, 0.001)
-            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 60], gamma=0.1)
-            self._train(train_loader, val_loader, epochs, optimizer, scheduler)
-            return
-
-        # Training on all new + examplars
-        print("Training")
-        self._finetuning = False
-        epochs = 60
-        optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.1, 0.001)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [40, 50], gamma=0.1)
-        self._train(train_loader, val_loader, epochs, optimizer, scheduler)
-
-        # Fine-tuning on sub-set new + examplars
-        print("Fine-tuning")
-        self._old_model = self._network.copy().freeze()
-
-        self._finetuning = True
-        self._build_examplars(train_loader,
-                              n_examplars=self._k // (self._n_classes - self._task_size))
-        train_loader.dataset.set_idxes(self.examplars)  # Fine-tuning only on balanced dataset
-
-        optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.01, 0.001)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 20], gamma=0.1)
-        self._train(train_loader, val_loader, 40, optimizer, scheduler)
+        optimizer = factory.get_optimizer(
+            self._network.parameters(), self._opt_name, self._lr, self._weight_decay
+        )
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, self._scheduling, gamma=self._lr_decay
+        )
+        self._train(train_loader, val_loader, self._epochs, optimizer, scheduler)
 
     def _after_task(self, data_loader):
         self._reduce_examplars()
         self._build_examplars(data_loader)
-
         self._old_model = self._network.copy().freeze()
 
     def _eval_task(self, data_loader):
@@ -129,21 +104,13 @@ class End2End(IncrementalLearner):
     # -----------
 
     def _train(self, train_loader, val_loader, n_epochs, optimizer, scheduler):
-        self._callbacks = [
-            callbacks.GaussianNoiseAnnealing(self._network.parameters()),
-            #callbacks.EarlyStopping(self._network, minimize_metric=False)
-        ]
         self._best_acc = float("-inf")
 
         print("nb ", len(train_loader.dataset))
-        prog_bar = tqdm.trange(n_epochs, desc="Losses.")
 
         val_acc = 0.
         train_acc = 0.
-        for epoch in prog_bar:
-            for cb in self._callbacks:
-                cb.on_epoch_begin()
-
+        for epoch in range(n_epochs):
             scheduler.step()
 
             _clf_loss, _distil_loss = 0., 0.
@@ -171,47 +138,28 @@ class End2End(IncrementalLearner):
 
                 loss.backward()
 
-                #if self._task != 0:
-                #    for param in self._network.parameters():
-                #        param.grad = param.grad * (self._temperature ** 2)
-                for cb in self._callbacks:
-                    cb.before_step()
                 optimizer.step()
 
                 _clf_loss += clf_loss.item()
                 _distil_loss += distil_loss.item()
 
-                if i % 10 == 0 or i >= len(train_loader):
-                    prog_bar.set_description(
-                        "Clf: {}; Distill: {}; Train: {}; Val: {}".format(
-                            round(clf_loss.item(), 3), round(distil_loss.item(), 3),
-                            round(train_acc, 3),
-                            round(val_acc, 3)
-                        )
-                    )
-
             if val_loader:
+                self._network.eval()
                 ypred, ytrue = self._classify(val_loader)
                 val_acc = (ypred == ytrue).sum() / len(ytrue)
                 self._best_acc = max(self._best_acc, val_acc)
                 ypred, ytrue = self._classify(train_loader)
                 train_acc = (ypred == ytrue).sum() / len(ytrue)
+                self._network.train()
 
-            for cb in self._callbacks:
-                cb.on_epoch_end(metric=val_acc)
-
-            prog_bar.set_description(
-                "Clf: {}; Distill: {}; Train: {}; Val: {}".format(
-                    round(_clf_loss / c, 3), round(_distil_loss / c, 3),
+            print("Epoch {}/{}; Clf: {}; Distill: {}; Train: {}; Val: {}".format(
+                    epoch, n_epochs,
+                    round(_clf_loss / c, 3),
+                    round(_distil_loss / c, 3),
                     round(train_acc, 3),
                     round(val_acc, 3),
                 )
             )
-
-            for cb in self._callbacks:
-                if not cb.in_training:
-                    self._network = cb.network
-                    return
 
         print("best", self._best_acc)
 
@@ -231,26 +179,33 @@ class End2End(IncrementalLearner):
         if self._task == 0:
             distil_loss = torch.zeros(1, device=self._device)
         else:
-            if self._finetuning:
-                # We only do distillation on current task during the distillation
-                # phase:
-                last_index = len(self._task_idxes)
-            else:
-                last_index = len(self._task_idxes) - 1
+            last_index = len(self._task_idxes) - 1
 
             distil_loss = 0.
-            #with torch.no_grad():
-            previous_logits = self._old_model(inputs)
+            with torch.no_grad():
+                previous_logits = self._old_model(inputs)
 
             for i in range(last_index):
                 task_idxes = self._task_idxes[i]
 
-                distil_loss += F.binary_cross_entropy(
-                    F.softmax(logits[..., task_idxes] / self._temperature, dim=1),
-                    F.softmax(previous_logits[..., task_idxes] / self._temperature, dim=1)
+                ce_loss = F.binary_cross_entropy(
+                    F.softmax(logits[..., task_idxes], dim=1),
+                    F.softmax(previous_logits[..., task_idxes], dim=1)
                 )
+                entropy_loss = self.entropy(logits[..., task_idxes])
+
+                mer_loss = ce_loss - entropy_loss
+                if mer_loss < 0:
+                    import pdb; pdb.set_trace()
+
+                distil_loss += mer_loss
 
         return clf_loss, distil_loss
+
+    @staticmethod
+    def entropy(p):
+        e = F.softmax(p, dim=1) * F.log_softmax(p, dim=1)
+        return -1.0 * e.mean()
 
     def _compute_predictions(self, loader):
         """Precomputes the logits before a task.
@@ -293,48 +248,6 @@ class End2End(IncrementalLearner):
         """Returns the number of examplars per class."""
         return self._k // self._n_classes
 
-    def _extract_features(self, loader):
-        features = []
-        idxes = []
-
-        for (real_idxes, _), inputs, _ in loader:
-            inputs = inputs.to(self._device)
-            features.append(self._network.extract(inputs).detach())
-            idxes.extend(real_idxes.numpy().tolist())
-
-        features = torch.cat(features)
-        mean = torch.mean(features, dim=0, keepdim=False)
-
-        return features, mean, idxes
-
-    @staticmethod
-    def _get_closest(centers, features):
-        """Returns the center index being the closest to each feature.
-
-        :param centers: Centers to compare, in this case the class means.
-        :param features: A tensor of features extracted by the convnet.
-        :return: A numpy array of the closest centers indexes.
-        """
-        pred_labels = []
-
-        features = features
-        for feature in features:
-            distances = End2End._dist(centers, feature)
-            pred_labels.append(distances.argmin().item())
-
-        return np.array(pred_labels)
-
-    @staticmethod
-    def _dist(a, b):
-        """Computes L2 distance between two tensors.
-
-        :param a: A tensor.
-        :param b: A tensor.
-        :return: A tensor of distance being of the shape of the "biggest" input
-                 tensor.
-        """
-        return torch.pow(a - b, 2).sum(-1)
-
     def _build_examplars(self, loader, n_examplars=None):
         """Builds new examplars.
 
@@ -358,16 +271,15 @@ class End2End(IncrementalLearner):
         :param n_examplars: Maximum number of examplars to create.
         :return: The real indexes of the chosen examplars.
         """
-        features, class_mean, idxes = self._extract_features(loader)
+        idxes = []
+        for (real_idxes, _), _, _ in loader:
+            idxes.extend(real_idxes.numpy().tolist())
+        idxes = np.array(idxes)
 
-        class_mean = F.normalize(class_mean, dim=0)
-        features = F.normalize(features, dim=1)
-        distances_to_mean = self._dist(class_mean, features)
+        nb_examplars = min(n_examplars, len(idxes))
 
-        nb_examplars = min(n_examplars, len(features))
-
-        fake_idxes = distances_to_mean.argsort().cpu().numpy()[:nb_examplars]
-        return [idxes[idx] for idx in fake_idxes]
+        np.random.shuffle(idxes)
+        return idxes[:nb_examplars]
 
     @property
     def examplars(self):

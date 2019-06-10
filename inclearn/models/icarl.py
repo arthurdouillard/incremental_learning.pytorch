@@ -1,14 +1,13 @@
-import copy
-
 import numpy as np
 import torch
-from torch import nn
+from scipy.spatial.distance import cdist
 from torch.nn import functional as F
-from tqdm import trange
+from tqdm import tqdm
 
-from inclearn import factory, utils
-from inclearn.lib import network
+from inclearn.lib import factory, network, utils
 from inclearn.models.base import IncrementalLearner
+
+EPSILON = 1e-8
 
 
 class ICarl(IncrementalLearner):
@@ -34,10 +33,10 @@ class ICarl(IncrementalLearner):
         self._scheduling = args["scheduling"]
         self._lr_decay = args["lr_decay"]
 
-        self._k = args["memory_size"]
+        self._memory_size = args["memory_size"]
         self._n_classes = 0
 
-        self._network = network.BasicNet(args["convnet"], device=self._device)
+        self._network = network.BasicNet(args["convnet"], device=self._device, use_bias=True)
 
         self._examplars = {}
         self._means = None
@@ -46,6 +45,8 @@ class ICarl(IncrementalLearner):
 
         self._clf_loss = F.binary_cross_entropy_with_logits
         self._distil_loss = F.binary_cross_entropy_with_logits
+
+        self._herding_matrix = np.zeros((100, 500))  # FIXME: nb classes
 
     def eval(self):
         self._network.eval()
@@ -60,7 +61,7 @@ class ICarl(IncrementalLearner):
     def _before_task(self, train_loader, val_loader):
         self._n_classes += self._task_size
         self._network.add_classes(self._task_size)
-        print("Now {} examplars per class.".format(self._m))
+        print("Now {} examplars per class.".format(self._memory_per_class))
 
         self._optimizer = factory.get_optimizer(
             self._network.parameters(), self._opt_name, self._lr, self._weight_decay
@@ -73,26 +74,22 @@ class ICarl(IncrementalLearner):
     def _train_task(self, train_loader, val_loader):
         print("nb ", len(train_loader.dataset))
 
-        prog_bar = trange(self._n_epochs, desc="Losses.")
-
-        for epoch in prog_bar:
+        for epoch in range(self._n_epochs):
             _loss = 0.
-            val_loss = 0.
 
             self._scheduler.step()
 
-            for inputs, targets in train_loader:
+            prog_bar = tqdm(train_loader)
+            c = 0
+            for inputs, targets in prog_bar:
+                c += 1
                 self._optimizer.zero_grad()
 
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 targets = utils.to_onehot(targets, self._n_classes).to(self._device)
                 logits = self._network(inputs)
 
-                loss = self._compute_loss(
-                    inputs,
-                    logits,
-                    targets
-                )
+                loss = self._compute_loss(inputs, logits, targets)
 
                 if not utils._check_loss(loss):
                     import pdb
@@ -103,34 +100,29 @@ class ICarl(IncrementalLearner):
 
                 _loss += loss.item()
 
-            prog_bar.set_description(
-                "Clf loss: {}; Val loss: {}".format(
-                    round(_loss / len(train_loader), 3), round(val_loss, 2)
+                prog_bar.set_description(
+                    "Task {}/{}, Epoch {}/{} => Clf loss: {}".format(
+                        self._task + 1, self._n_tasks,
+                        epoch + 1, self._n_epochs,
+                        round(_loss / c, 3)
+                    )
                 )
-            )
 
-    def _after_task(self, data_loader):
-        self._reduce_examplars()
-        self._build_examplars(data_loader)
+    def _after_task(self, inc_dataset):
+        self.build_examplars(inc_dataset)
 
         self._old_model = self._network.copy().freeze()
 
     def _eval_task(self, data_loader):
-        ypred, ytrue = self._classify(data_loader)
-        assert ypred.shape == ytrue.shape
+        ypred, ytrue = compute_accuracy(self._network, data_loader, self._class_means)
 
         return ypred, ytrue
-
-    def get_memory(self):
-        return self.examplars
 
     # -----------
     # Private API
     # -----------
 
     def _compute_loss(self, inputs, logits, targets):
-        targets = utils.one_hot(targets, self._n_classes)
-
         if self._old_model is None:
             loss = F.binary_cross_entropy_with_logits(logits, targets)
         else:
@@ -181,207 +173,90 @@ class ICarl(IncrementalLearner):
         return np.array(ypred), np.array(ytrue)
 
     @property
-    def _m(self):
+    def _memory_per_class(self):
         """Returns the number of examplars per class."""
-        return self._k // self._n_classes
+        return self._memory_size // self._n_classes
 
-    def _extract_features(self, loader):
-        features = []
-        idxes = []
+    # -----------------
+    # Memory management
+    # -----------------
 
-        for (real_idxes, _), inputs, _ in loader:
-            inputs = inputs.to(self._device)
-            features.append(self._network.extract(inputs).detach())
-            idxes.extend(real_idxes.numpy().tolist())
+    def build_examplars(self, inc_dataset):
+        self._data_memory, self._targets_memory = [], []
+        self._class_means = np.zeros((100, self._network.features_dim))
 
-        features = F.normalize(torch.cat(features), dim=1)
-        mean = torch.mean(features, dim=0, keepdim=False)
+        for class_idx in range(self._n_classes):
+            inputs, loader = inc_dataset.get_class_loader(class_idx, mode="test")
+            features, targets = extract_features(
+                self._network, loader
+            )
+            features_flipped, _ = extract_features(
+                self._network, inc_dataset.get_class_loader(class_idx, mode="flip")[1]
+            )
 
-        return features, mean, idxes
-
-    @staticmethod
-    def _get_closest(centers, features):
-        pred_labels = []
-
-        features = features
-        for feature in features:
-            distances = ICarl._dist(feature, centers)
-            pred_labels.append(distances.argmin().item())
-
-        return np.array(pred_labels)
-
-    @staticmethod
-    def _dist(one, many):
-        return -(one @ many.transpose(1, 0)).squeeze()
-        #return torch.pow(one - many, 2).sum(-1)
-
-    def _build_examplars(self, loader):
-        #loader.dataset._use_data_augmentation = False
-
-        means = []
-
-
-        lo, hi = 0, self._task * self._task_size
-        print("Updating examplars for classes {} -> {}.".format(lo, hi))
-        for class_idx in range(lo, hi):
-
-            loader.dataset.set_idxes(self._examplars[class_idx])
-            # loader.dataset._flip_all = True
-            #loader.dataset.double_dataset()
-            _, examplar_mean, _ = self._extract_features(loader)
-            means.append(F.normalize(examplar_mean, dim=0))
-            #loader.dataset._flip_all = False
-
-        lo, hi = self._task * self._task_size, self._n_classes
-        print("Building examplars for classes {} -> {}.".format(lo, hi))
-        for class_idx in range(lo, hi):
-            examplars_idxes = []
-
-            loader.dataset.set_classes_range(class_idx, class_idx)
-
-            features, class_mean, idxes = self._extract_features(loader)
-            examplars_mean = torch.zeros(self._network.convnet.out_dim, device=self._device)
-
-            class_mean = F.normalize(class_mean, dim=0)
-            """
-            # Icarl
-            for i in range(min(self._m, features.shape[0])):
-                tmp = F.normalize(
-                    (features + examplars_mean) / (i + 1),
-                    dim=1
+            if class_idx >= self._n_classes - self._task_size:
+                print("Finding examplars for", class_idx)
+                self._herding_matrix[class_idx, :] = select_examplars(
+                    features, self._memory_per_class
                 )
-                distances = self._dist(class_mean, tmp)
-                idxes_winner = distances.argsort().cpu().numpy()
 
-                for idx in idxes_winner:
-                    real_idx = idxes[idx]
-                    if real_idx in examplars_idxes:
-                        continue
+            examplar_mean, alph = compute_examplar_mean(
+                features, features_flipped, self._herding_matrix[class_idx], self._memory_per_class
+            )
+            self._data_memory.append(inputs[np.where(alph == 1)[0]])
+            self._targets_memory.append(targets[np.where(alph == 1)[0]])
 
-                    examplars_idxes.append(real_idx)
-                    examplars_mean += features[idx]
-                    break
-            """
+            self._class_means[class_idx, :] = examplar_mean
 
-            # icarl rebuffi
-            n_iter = 0
-            w_t = class_mean.clone()
-            origi = []
-            while (len(examplars_idxes) < min(self._m, features.shape[0]) and n_iter < 1000):
-                tmp_t = (w_t @ features.transpose(1, 0)).squeeze()
-                idx_max = tmp_t.argmax()
+        self._data_memory = np.concatenate(self._data_memory)
+        self._targets_memory = np.concatenate(self._targets_memory)
 
-                n_iter += 1
-
-                if idxes[idx_max] not in examplars_idxes:
-                    examplars_idxes.append(idxes[idx_max])
-                    examplars_mean += features[idx_max]
-                    origi.append(idx_max)
-
-                w_t = w_t + class_mean - features[idx_max]
-
-            if len(examplars_idxes) < min(self._m, features.shape[0]):
-                remaining = [idx for idx in list(range(features.shape[0])) if idx not in origi]
-                import random
-                random.shuffle(remaining)
-                missing = min(self._m, features.shape[0]) - len(examplars_idxes)
-                for i in range(missing):
-                    examplars_mean += features[remaining[i]]
-                    examplars_idxes.append(idxes[remaining[i]])
-
-            #loader.dataset.set_idxes(examplars_idxes)
-            #loader.dataset.double_dataset()
-            #loader.dataset._flip_all = True
-            #features, class_mean, idxes = self._extract_features(loader)
-            #means.append(F.normalize(class_mean, dim=0))
-            #loader.dataset._flip_all = False
-            """
-            # random
-            fake_idxes = [i for i in range(features.shape[0])]
-            import random
-            random.shuffle(fake_idxes)
-            fake_idxes = fake_idxes[:min(self._m, features.shape[0])]
-            examplars_idxes = [idxes[idx] for idx in fake_idxes]
-            for idx in fake_idxes:
-                examplars_mean += features[idx]
-            """
-            """
-            dists = (class_mean @ features.transpose(1, 0)).squeeze()
-            sorted_idxes = dists.argsort(descending=True)[:min(self._m, features.shape[0])]
-            for idx in sorted_idxes:
-                examplars_idxes.append(idxes[idx])
-                examplars_mean += features[idx]
-            """
-
-            means.append(F.normalize(examplars_mean / len(examplars_idxes), dim=0))
-            self._examplars[class_idx] = examplars_idxes
-
-        self._means = torch.stack(means)
-        #loader.dataset._use_data_augmentation = True
-
-    @property
-    def examplars(self):
-        return np.array(
-            [
-                examplar_idx for class_examplars in self._examplars.values()
-                for examplar_idx in class_examplars
-            ]
-        )
-
-    def _reduce_examplars(self):
-        return
-        print("Reducing examplars.")
-        for class_idx in range(len(self._examplars)):
-            self._examplars[class_idx] = self._examplars[class_idx][:self._m]
+    def get_memory(self):
+        return self._data_memory, self._targets_memory
 
 
+def extract_features(model, loader):
+    targets, features = [], []
 
+    for _inputs, _targets in loader:
+        _targets = _targets.numpy()
+        _features = model.extract(_inputs.to(model.device)).detach().cpu().numpy()
 
-def extract_features(model, dataset):
-    gen = DataLoader(dataset, shuffle=False, batch_size=256)
-    features = []
-    targets_all = []
-    for inputs, targets in gen:
-        features.append(model.extract(inputs.to(model.device)).detach())
-        targets_all.append(targets.numpy())
+        features.append(_features)
+        targets.append(_targets)
 
-    return torch.cat(features), np.concatenate(targets_all)
-
-
-def extract(model, x, y):
-    feat_normal, _ = extract_features(model, IncDataset(x, y, train=None))
-    feat_flip, _ = extract_features(model, IncDataset(x, y, train="flip"))
-
-    return feat_normal, feat_flip
+    return np.concatenate(features), np.concatenate(targets)
 
 
 def select_examplars(features, nb_max):
-    D = features.cpu().numpy().T
+    D = features.T
     D = D / (np.linalg.norm(D, axis=0) + EPSILON)
     mu = np.mean(D, axis=1)
-    herding_mat = np.zeros((features.shape[0]))
+    herding_matrix = np.zeros((features.shape[0],))
 
     w_t = mu
     iter_herding, iter_herding_eff = 0, 0
 
-    while not(np.sum(herding_mat!=0)==min(nb_max,features.shape[0])) and iter_herding_eff<1000:
-        tmp_t   = np.dot(w_t, D)
+    while not (
+        np.sum(herding_matrix != 0) == min(nb_max, features.shape[0])
+    ) and iter_herding_eff < 1000:
+        tmp_t = np.dot(w_t, D)
         ind_max = np.argmax(tmp_t)
         iter_herding_eff += 1
-        if herding_mat[ind_max] == 0:
-            herding_mat[ind_max] = 1 + iter_herding
+        if herding_matrix[ind_max] == 0:
+            herding_matrix[ind_max] = 1 + iter_herding
             iter_herding += 1
 
         w_t = w_t + mu - D[:, ind_max]
 
-    return herding_mat
+    return herding_matrix
 
 
 def compute_examplar_mean(feat_norm, feat_flip, herding_mat, nb_max):
-    D = feat_norm.cpu().numpy().T
+    D = feat_norm.T
     D = D / (np.linalg.norm(D, axis=0) + EPSILON)
 
-    D2 = feat_flip.cpu().numpy().T
+    D2 = feat_flip.T
     D2 = D2 / (np.linalg.norm(D2, axis=0) + EPSILON)
 
     alph = herding_mat
@@ -395,19 +270,24 @@ def compute_examplar_mean(feat_norm, feat_flip, herding_mat, nb_max):
     return mean, alph
 
 
-def compute_accuracy(model, test_dataset, class_means):
-    features, targets_ = extract_features(model, test_dataset)
-    features = features.cpu().numpy()
+def compute_accuracy(model, loader, class_means):
+    features, targets_ = extract_features(model, loader)
 
-    targets = np.zeros((targets_.shape[0], 100),np.float32)
-    targets[range(len(targets_)),targets_.astype('int32')] = 1.
-    features  = (features.T / (np.linalg.norm(features.T,axis=0) + EPSILON)).T
+    targets = np.zeros((targets_.shape[0], 100), np.float32)
+    targets[range(len(targets_)), targets_.astype('int32')] = 1.
+    features = (features.T / (np.linalg.norm(features.T, axis=0) + EPSILON)).T
 
     # Compute score for iCaRL
-    sqd         = cdist(class_means, features, 'sqeuclidean')
+    sqd = cdist(class_means, features, 'sqeuclidean')
     score_icarl = (-sqd).T
 
     # Compute the accuracy over the batch
-    stat_icarl = [ll in best for ll, best in zip(targets_.astype('int32'), np.argsort(score_icarl, axis=1)[:, -1:])]
+    stat_icarl = [
+        ll in best
+        for ll, best in zip(targets_.astype('int32'),
+                            np.argsort(score_icarl, axis=1)[:, -1:])
+    ]
 
-    return np.average(stat_icarl)
+    print("stats ", np.average(stat_icarl))
+
+    return np.argsort(score_icarl, axis=1)[:, -1], targets_
