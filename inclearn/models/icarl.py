@@ -71,58 +71,41 @@ class ICarl(IncrementalLearner):
         )
 
     def _train_task(self, train_loader, val_loader):
-        #for p in self.parameters():
-        #    p.register_hook(lambda grad: torch.clamp(grad, -5, 5))
-
         print("nb ", len(train_loader.dataset))
 
         prog_bar = trange(self._n_epochs, desc="Losses.")
 
-        val_loss = 0.
         for epoch in prog_bar:
-            _clf_loss, _distil_loss = 0., 0.
-            c = 0
+            _loss = 0.
+            val_loss = 0.
 
             self._scheduler.step()
 
-            for i, ((_, idxes), inputs, targets) in enumerate(train_loader, start=1):
+            for inputs, targets in train_loader:
                 self._optimizer.zero_grad()
 
-                c += len(idxes)
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 targets = utils.to_onehot(targets, self._n_classes).to(self._device)
                 logits = self._network(inputs)
 
-                clf_loss, distil_loss = self._compute_loss(
+                loss = self._compute_loss(
                     inputs,
                     logits,
-                    targets,
-                    idxes,
+                    targets
                 )
 
-                if not utils._check_loss(clf_loss) or not utils._check_loss(distil_loss):
+                if not utils._check_loss(loss):
                     import pdb
                     pdb.set_trace()
-
-                loss = clf_loss + distil_loss
 
                 loss.backward()
                 self._optimizer.step()
 
-                _clf_loss += clf_loss.item()
-                _distil_loss += distil_loss.item()
-
-                if i % 10 == 0 or i >= len(train_loader):
-                    prog_bar.set_description(
-                        "Clf loss: {}; Distill loss: {}; Val loss: {}".format(
-                            round(clf_loss.item(), 3), round(distil_loss.item(), 3),
-                            round(val_loss, 3)
-                        )
-                    )
+                _loss += loss.item()
 
             prog_bar.set_description(
-                "Clf loss: {}; Distill loss: {}; Val loss: {}".format(
-                    round(_clf_loss / c, 3), round(_distil_loss / c, 3), round(val_loss, 2)
+                "Clf loss: {}; Val loss: {}".format(
+                    round(_loss / len(train_loader), 3), round(val_loss, 2)
                 )
             )
 
@@ -138,35 +121,27 @@ class ICarl(IncrementalLearner):
 
         return ypred, ytrue
 
-    def get_memory_indexes(self):
+    def get_memory(self):
         return self.examplars
 
     # -----------
     # Private API
     # -----------
 
-    def _compute_loss(self, inputs, logits, targets, idxes, train=True):
-        if self._task == 0:
-            # First task, only doing classification loss
-            clf_loss = self._clf_loss(logits, targets)
-            distil_loss = torch.zeros(1, device=self._device)
+    def _compute_loss(self, inputs, logits, targets):
+        targets = utils.one_hot(targets, self._n_classes)
+
+        if self._old_model is None:
+            loss = F.binary_cross_entropy_with_logits(logits, targets)
         else:
-            clf_loss = self._clf_loss(
-                logits[..., self._new_task_index:], targets[..., self._new_task_index:]
-            )
+            old_targets = torch.sigmoid(self._old_model(inputs).detach())
 
-            temp = 1
-            #previous_preds = self._previous_preds if train else self._previous_preds_val
-            tmp = torch.sigmoid(self._old_model(inputs).detach() / temp)
-            #if not torch.allclose(previous_preds[idxes], tmp):
-            #    import pdb; pdb.set_trace()
+            new_targets = targets.clone()
+            new_targets[..., :-self._task_size] = old_targets
 
-            distil_loss = self._distil_loss(
-                logits[..., :self._new_task_index] / temp, tmp
-                #previous_preds[idxes, :self._new_task_index]
-            )
+            loss = F.binary_cross_entropy_with_logits(logits, new_targets)
 
-        return clf_loss, distil_loss
+        return loss
 
     def _compute_predictions(self, data_loader):
         preds = torch.zeros(self._n_train_data, self._n_classes, device=self._device)
@@ -245,9 +220,11 @@ class ICarl(IncrementalLearner):
 
         means = []
 
+
         lo, hi = 0, self._task * self._task_size
         print("Updating examplars for classes {} -> {}.".format(lo, hi))
         for class_idx in range(lo, hi):
+
             loader.dataset.set_idxes(self._examplars[class_idx])
             # loader.dataset._flip_all = True
             #loader.dataset.double_dataset()
@@ -352,6 +329,85 @@ class ICarl(IncrementalLearner):
         )
 
     def _reduce_examplars(self):
+        return
         print("Reducing examplars.")
         for class_idx in range(len(self._examplars)):
             self._examplars[class_idx] = self._examplars[class_idx][:self._m]
+
+
+
+
+def extract_features(model, dataset):
+    gen = DataLoader(dataset, shuffle=False, batch_size=256)
+    features = []
+    targets_all = []
+    for inputs, targets in gen:
+        features.append(model.extract(inputs.to(model.device)).detach())
+        targets_all.append(targets.numpy())
+
+    return torch.cat(features), np.concatenate(targets_all)
+
+
+def extract(model, x, y):
+    feat_normal, _ = extract_features(model, IncDataset(x, y, train=None))
+    feat_flip, _ = extract_features(model, IncDataset(x, y, train="flip"))
+
+    return feat_normal, feat_flip
+
+
+def select_examplars(features, nb_max):
+    D = features.cpu().numpy().T
+    D = D / (np.linalg.norm(D, axis=0) + EPSILON)
+    mu = np.mean(D, axis=1)
+    herding_mat = np.zeros((features.shape[0]))
+
+    w_t = mu
+    iter_herding, iter_herding_eff = 0, 0
+
+    while not(np.sum(herding_mat!=0)==min(nb_max,features.shape[0])) and iter_herding_eff<1000:
+        tmp_t   = np.dot(w_t, D)
+        ind_max = np.argmax(tmp_t)
+        iter_herding_eff += 1
+        if herding_mat[ind_max] == 0:
+            herding_mat[ind_max] = 1 + iter_herding
+            iter_herding += 1
+
+        w_t = w_t + mu - D[:, ind_max]
+
+    return herding_mat
+
+
+def compute_examplar_mean(feat_norm, feat_flip, herding_mat, nb_max):
+    D = feat_norm.cpu().numpy().T
+    D = D / (np.linalg.norm(D, axis=0) + EPSILON)
+
+    D2 = feat_flip.cpu().numpy().T
+    D2 = D2 / (np.linalg.norm(D2, axis=0) + EPSILON)
+
+    alph = herding_mat
+    alph = (alph > 0) * (alph < nb_max + 1) * 1.
+
+    alph_mean = alph / np.sum(alph)
+
+    mean = (np.dot(D, alph_mean) + np.dot(D2, alph_mean)) / 2
+    mean /= np.linalg.norm(mean)
+
+    return mean, alph
+
+
+def compute_accuracy(model, test_dataset, class_means):
+    features, targets_ = extract_features(model, test_dataset)
+    features = features.cpu().numpy()
+
+    targets = np.zeros((targets_.shape[0], 100),np.float32)
+    targets[range(len(targets_)),targets_.astype('int32')] = 1.
+    features  = (features.T / (np.linalg.norm(features.T,axis=0) + EPSILON)).T
+
+    # Compute score for iCaRL
+    sqd         = cdist(class_means, features, 'sqeuclidean')
+    score_icarl = (-sqd).T
+
+    # Compute the accuracy over the batch
+    stat_icarl = [ll in best for ll, best in zip(targets_.astype('int32'), np.argsort(score_icarl, axis=1)[:, -1:])]
+
+    return np.average(stat_icarl)
