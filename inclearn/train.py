@@ -1,10 +1,11 @@
 import copy
 import random
+import time
 
 import numpy as np
 import torch
 
-from inclearn import factory, results_utils, utils
+from inclearn.lib import factory, results_utils, utils
 
 
 def train(args):
@@ -14,7 +15,10 @@ def train(args):
     for seed in seed_list:
         args["seed"] = seed
         args["device"] = device
+
+        start_time = time.time()
         _train(args)
+        print("Training finished in {}s.".format(time.time() - start_time))
 
 
 def _train(args):
@@ -22,53 +26,50 @@ def _train(args):
 
     factory.set_device(args)
 
-    train_set = factory.get_data(args, train=True)
-    test_set = factory.get_data(args, train=False, classes_order=train_set.classes_order)
-
-    train_loader, val_loader = train_set.get_loader(args["validation"])
-    test_loader, _ = test_set.get_loader()
-    #val_loader = test_loader
+    inc_dataset = factory.get_data(args)
+    args["classes_order"] = inc_dataset.class_order
 
     model = factory.get_model(args)
 
     results = results_utils.get_template_results(args)
 
-    for task in range(0, train_set.total_n_classes // args["increment"]):
-        if args["max_task"] == task:
+    memory = None
+
+    for _ in range(inc_dataset.n_tasks):
+        task_info, train_loader, test_loader = inc_dataset.new_task(memory)
+        if task_info["task"] == args["max_task"]:
             break
 
-        # Setting current task's classes:
-        train_set.set_classes_range(low=task * args["increment"],
-                                    high=(task + 1) * args["increment"])
-        test_set.set_classes_range(high=(task + 1) * args["increment"])
-
         model.set_task_info(
-            task,
-            train_set.total_n_classes,
-            args["increment"],
-            len(train_set),
-            len(test_set)
+            task=task_info["task"],
+            total_n_classes=task_info["max_class"],
+            increment=task_info["increment"],
+            n_train_data=task_info["n_train_data"],
+            n_test_data=task_info["n_test_data"],
+            n_tasks=task_info["max_task"]
         )
 
-        model.before_task(train_loader, val_loader)
-        print("train", task * args["increment"], (task + 1) * args["increment"])
-        model.train_task(train_loader, val_loader)
-        model.after_task(train_loader)
+        model.eval()
+        model.before_task(train_loader, None)
+        print("Train on {}->{}.".format(task_info["min_class"], task_info["max_class"]))
+        model.train()
+        model.train_task(train_loader, None)
+        model.eval()
+        model.after_task(inc_dataset)
 
+        print("Eval on {}->{}.".format(0, task_info["max_class"]))
         ypred, ytrue = model.eval_task(test_loader)
         acc_stats = utils.compute_accuracy(ypred, ytrue, task_size=args["increment"])
         print(acc_stats)
         results["results"].append(acc_stats)
 
-        memory_indexes = model.get_memory_indexes()
-        train_set.set_memory(memory_indexes)
+        memory = model.get_memory()
 
     if args["name"]:
         results_utils.save_results(results, args["name"])
 
     del model
-    del train_set
-    del test_set
+    del inc_dataset
     torch.cuda.empty_cache()
 
 

@@ -1,5 +1,7 @@
-from .e2e import End2End
+#from .e2e import End2End
+#from .fixedrepresentation import FixedRepresentation
+#from .focusforget import FocusForget
 from .icarl import ICarl
-from .lwf import LwF
 
-__all__ = ["ICarl", "LwF", "End2End"]
+#from .lwf import LwF
+#from .medic import Medic

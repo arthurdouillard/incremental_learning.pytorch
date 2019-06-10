@@ -128,15 +128,15 @@ class LwF(IncrementalLearner):
         self._n_classes += n
 
     def _compute_predictions(self, data_loader):
-        preds = torch.zeros(self._n_train_data, self._n_classes, device=self._device)
+        logits = torch.zeros(self._n_train_data, self._n_classes, device=self._device)
 
         for idxes, inputs, _ in data_loader:
             inputs = inputs.to(self._device)
             idxes = idxes[1].to(self._device)
 
-            preds[idxes] = self.forward(inputs).detach()
+            logits[idxes] = self.forward(inputs).detach() ** (1 / self._temperature)
 
-        return F.softmax(preds, dim=1)
+        return logits
 
     def _compute_loss(self, logits, targets, idxes):
         if self._task == 0:
@@ -149,8 +149,7 @@ class LwF(IncrementalLearner):
             clf_loss = F.cross_entropy(logits[..., self._new_task_index:], targets, ignore_index=-1)
 
             distil_loss = F.binary_cross_entropy(
-                torch.softmax(logits[..., :self._new_task_index]**(1 / self._temperature), dim=1),
-                self._previous_preds[idxes]**(1 / self._temperature))
+                F.softmax(logits[..., :self._new_task_index], dim=1), self._previous_preds[idxes])
 
         return clf_loss, distil_loss
 

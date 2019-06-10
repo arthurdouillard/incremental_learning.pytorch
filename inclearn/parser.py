@@ -22,13 +22,13 @@ def get_parser():
                         help="Temperature used to soften the predictions.")
 
     # Data related:
-    parser.add_argument("-d", "--dataset", default="iCIFAR100", type=str,
+    parser.add_argument("-d", "--dataset", default="cifar100", type=str,
                         help="Dataset to test on.")
     parser.add_argument("-inc", "--increment", default=10, type=int,
                         help="Number of class to add per task.")
     parser.add_argument("-b", "--batch-size", default=128, type=int,
                         help="Batch size.")
-    parser.add_argument("-w", "--workers", default=10, type=int,
+    parser.add_argument("-w", "--workers", default=1, type=int,
                         help="Number of workers preprocessing the data.")
     parser.add_argument("-v", "--validation", default=0., type=float,
                         help="Validation split (0. <= x <= 1.).")
@@ -44,7 +44,7 @@ def get_parser():
                         help="Weight decay.")
     parser.add_argument("-sc", "--scheduling", default=[50, 64], nargs="*", type=int,
                         help="Epoch step where to reduce the learning rate.")
-    parser.add_argument("-lr-decay", "--lr-decay", default=1/5, type=int,
+    parser.add_argument("-lr-decay", "--lr-decay", default=1/5, type=float,
                         help="LR multiplied by it.")
     parser.add_argument("-opt", "--optimizer", default="sgd", type=str,
                         help="Optimizer to use.")
@@ -60,5 +60,6 @@ def get_parser():
                         help="Random seed.")
     parser.add_argument("-seed-range", "--seed-range", type=int, nargs=2,
                         help="Seed range going from first number to second (both included).")
+
 
     return parser

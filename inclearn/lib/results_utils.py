@@ -5,7 +5,7 @@ import os
 
 import matplotlib.pyplot as plt
 
-from inclearn import utils
+from inclearn.lib import utils
 
 
 def get_template_results(args):
@@ -15,7 +15,7 @@ def get_template_results(args):
 def save_results(results, label):
     del results["config"]["device"]
 
-    folder_path = os.path.join("results", label)
+    folder_path = os.path.join("results", "{}_{}".format(utils.get_date(), label))
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
@@ -40,7 +40,12 @@ def extract(paths, avg_inc=False):
         with open(path) as f:
             data = json.load(f)
 
-        accs = [100 * task["total"] for task in data["results"]]
+        if isinstance(data["results"][0], dict):
+            accs = [100 * task["total"] for task in data["results"]]
+        elif isinstance(data["results"][0], float):
+            accs = [100 * task_acc for task_acc in data["results"]]
+        else:
+            raise NotImplementedError(type(data["results"][0]))
 
         if avg_inc:
             accs = compute_avg_inc_acc(accs)
@@ -118,6 +123,10 @@ def compute_unique_score(runs_accs, skip_first=False):
     return str(round(mean_of_mean, 2)), std
 
 
+def get_max_label_length(results):
+    return max(len(r.get("label", r["path"])) for r in results)
+
+
 def plot(results, increment, total, title="", path_to_save=None):
     """Plotting utilities to visualize several experiments.
 
@@ -132,11 +141,18 @@ def plot(results, increment, total, title="", path_to_save=None):
 
     x = list(range(increment, total + 1, increment))
 
+    max_label_length = get_max_label_length(results) + 4
+
     for result in results:
         path = result["path"]
-        label = result["label"]
+        label = result.get("label", path)
+        from_paper = "[paper] " if result.get("from_paper", False) else "[me]     "
         avg_inc = result.get("average_incremental", False)
         skip_first = result.get("skip_first", False)
+        kwargs = result.get("kwargs", {})
+
+        if result.get("hidden", False):
+            continue
 
         if "*" in path:
             path = glob.glob(path)
@@ -148,12 +164,25 @@ def plot(results, increment, total, title="", path_to_save=None):
 
         unique_score, unique_std = compute_unique_score(runs_accs, skip_first=skip_first)
 
-        plt.errorbar(x, means, stds, label=label + " ({})".format(unique_score + unique_std),
-                     marker="o", markersize=3)
+        label = "{mode}{label}(avg: {avg}, last: {last})".format(
+            mode=from_paper,
+            label=label.ljust(max_label_length, " "),
+            avg=unique_score + unique_std,
+            last=round(means[-1], 2)
+        )
+
+        try:
+            plt.errorbar(x, means, stds, label=label, marker="o", markersize=3, **kwargs)
+        except Exception:
+            print(x)
+            print(means)
+            print(stds)
+            print(label)
+            raise
 
     plt.legend(loc="upper right")
     plt.xlabel("Number of classes")
-    plt.ylabel("Average Incremental Accuracy")
+    plt.ylabel("Accuracy over seen classes")
     plt.title(title)
 
     for i in range(10, total + 1, 10):
