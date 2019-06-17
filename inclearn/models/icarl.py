@@ -46,7 +46,7 @@ class ICarl(IncrementalLearner):
         self._clf_loss = F.binary_cross_entropy_with_logits
         self._distil_loss = F.binary_cross_entropy_with_logits
 
-        self._herding_matrix = np.zeros((100, 500))  # FIXME: nb classes
+        self._herding_matrix = []
 
     def eval(self):
         self._network.eval()
@@ -75,21 +75,15 @@ class ICarl(IncrementalLearner):
         print("nb ", len(train_loader.dataset))
 
         for epoch in range(self._n_epochs):
-            _loss = 0.
+            _loss, val_loss = 0., 0.
 
             self._scheduler.step()
 
             prog_bar = tqdm(train_loader)
-            c = 0
-            for inputs, targets in prog_bar:
-                c += 1
+            for i, (inputs, targets) in enumerate(prog_bar, start=1):
                 self._optimizer.zero_grad()
 
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
-                targets = utils.to_onehot(targets, self._n_classes).to(self._device)
-                logits = self._network(inputs)
-
-                loss = self._compute_loss(inputs, logits, targets)
+                loss = self._forward_loss(inputs, targets)
 
                 if not utils._check_loss(loss):
                     import pdb
@@ -100,13 +94,25 @@ class ICarl(IncrementalLearner):
 
                 _loss += loss.item()
 
+                if val_loader is not None and i == len(train_loader):
+                    for inputs, targets in val_loader:
+                        val_loss += self._forward_loss(inputs, targets).item()
+
                 prog_bar.set_description(
-                    "Task {}/{}, Epoch {}/{} => Clf loss: {}".format(
+                    "Task {}/{}, Epoch {}/{} => Clf loss: {}, Val loss: {}".format(
                         self._task + 1, self._n_tasks,
                         epoch + 1, self._n_epochs,
-                        round(_loss / c, 3)
+                        round(_loss / i, 3),
+                        round(val_loss, 3)
                     )
                 )
+
+    def _forward_loss(self, inputs, targets):
+        inputs, targets = inputs.to(self._device), targets.to(self._device)
+        targets = utils.to_onehot(targets, self._n_classes).to(self._device)
+        logits = self._network(inputs)
+
+        return self._compute_loss(inputs, logits, targets)
 
     def _after_task(self, inc_dataset):
         self.build_examplars(inc_dataset)
@@ -182,23 +188,24 @@ class ICarl(IncrementalLearner):
     # -----------------
 
     def build_examplars(self, inc_dataset):
+        print("Building & updating memory.")
+
         self._data_memory, self._targets_memory = [], []
         self._class_means = np.zeros((100, self._network.features_dim))
 
         for class_idx in range(self._n_classes):
-            inputs, loader = inc_dataset.get_class_loader(class_idx, mode="test")
+            inputs, loader = inc_dataset.get_custom_loader(class_idx, mode="test")
             features, targets = extract_features(
                 self._network, loader
             )
             features_flipped, _ = extract_features(
-                self._network, inc_dataset.get_class_loader(class_idx, mode="flip")[1]
+                self._network, inc_dataset.get_custom_loader(class_idx, mode="flip")[1]
             )
 
             if class_idx >= self._n_classes - self._task_size:
-                print("Finding examplars for", class_idx)
-                self._herding_matrix[class_idx, :] = select_examplars(
+                self._herding_matrix.append(select_examplars(
                     features, self._memory_per_class
-                )
+                ))
 
             examplar_mean, alph = compute_examplar_mean(
                 features, features_flipped, self._herding_matrix[class_idx], self._memory_per_class
@@ -280,14 +287,5 @@ def compute_accuracy(model, loader, class_means):
     # Compute score for iCaRL
     sqd = cdist(class_means, features, 'sqeuclidean')
     score_icarl = (-sqd).T
-
-    # Compute the accuracy over the batch
-    stat_icarl = [
-        ll in best
-        for ll, best in zip(targets_.astype('int32'),
-                            np.argsort(score_icarl, axis=1)[:, -1:])
-    ]
-
-    print("stats ", np.average(stat_icarl))
 
     return np.argsort(score_icarl, axis=1)[:, -1], targets_

@@ -36,7 +36,7 @@ def _train(args):
     memory = None
 
     for _ in range(inc_dataset.n_tasks):
-        task_info, train_loader, test_loader = inc_dataset.new_task(memory)
+        task_info, train_loader, val_loader, test_loader = inc_dataset.new_task(memory)
         if task_info["task"] == args["max_task"]:
             break
 
@@ -50,10 +50,10 @@ def _train(args):
         )
 
         model.eval()
-        model.before_task(train_loader, None)
+        model.before_task(train_loader, val_loader)
         print("Train on {}->{}.".format(task_info["min_class"], task_info["max_class"]))
         model.train()
-        model.train_task(train_loader, None)
+        model.train_task(train_loader, val_loader)
         model.eval()
         model.after_task(inc_dataset)
 
