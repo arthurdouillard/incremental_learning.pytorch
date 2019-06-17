@@ -48,29 +48,24 @@ def extract(paths, avg_inc=False):
             raise NotImplementedError(type(data["results"][0]))
 
         if avg_inc:
-            accs = compute_avg_inc_acc(accs)
+            raise NotImplementedError("Deprecated")
 
         runs_accs.append(accs)
 
     return runs_accs
 
 
-def compute_avg_inc_acc(accs):
+def compute_avg_inc_acc(results):
     """Computes the average incremental accuracy as defined in iCaRL.
 
     The average incremental accuracies at task X are the average of accuracies
     at task 0, 1, ..., and X.
 
-    :param accs: A list of accuracies.
-    :return: A list of average incremental accuracies.
+    :param accs: A list of dict for per-class accuracy at each step.
+    :return: A float.
     """
-    avg_inc_accs = []
-
-    for i in range(len(accs)):
-        sub_accs = [accs[j] for j in range(0, i + 1)]
-        avg_inc_accs.append(sum(sub_accs) / len(sub_accs))
-
-    return avg_inc_accs
+    tasks_accuracy = [r["total"] for r in results]
+    return sum(tasks_accuracy) / len(tasks_accuracy)
 
 
 def aggregate(runs_accs):

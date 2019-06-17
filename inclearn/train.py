@@ -18,7 +18,7 @@ def train(args):
 
         start_time = time.time()
         _train(args)
-        print("Training finished in {}s.".format(time.time() - start_time))
+        print("Training finished in {}s.".format(int(time.time() - start_time)))
 
 
 def _train(args):
@@ -64,6 +64,12 @@ def _train(args):
         results["results"].append(acc_stats)
 
         memory = model.get_memory()
+
+    print(
+        "Average Incremental Accuracy: {}.".format(
+            results_utils.compute_avg_inc_acc(results["results"])
+        )
+    )
 
     if args["name"]:
         results_utils.save_results(results, args["name"])
