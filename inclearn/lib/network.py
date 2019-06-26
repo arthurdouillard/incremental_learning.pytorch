@@ -33,8 +33,8 @@ class BasicNet(nn.Module):
 
         if self.use_multi_fc:
             logits = []
-            for clf_name in self.classifier:
-                logits.append(self.__getattr__(clf_name)(features))
+            for classifier in self.classifier:
+                logits.append(classifier(features))
             logits = torch.cat(logits, 1)
         else:
             logits = self.classifier(features)
@@ -68,12 +68,10 @@ class BasicNet(nn.Module):
 
     def _add_classes_multi_fc(self, n_classes):
         if self.classifier is None:
-            self.classifier = []
+            self.classifier = nn.ModuleList([])
 
         new_classifier = self._gen_classifier(n_classes)
-        name = "_clf_{}".format(len(self.classifier))
-        self.__setattr__(name, new_classifier)
-        self.classifier.append(name)
+        self.classifier.append(new_classifier)
 
     def _add_classes_single_fc(self, n_classes):
         if self.classifier is not None:
