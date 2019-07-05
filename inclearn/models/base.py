@@ -51,6 +51,9 @@ class IncrementalLearner(abc.ABC):
     def get_memory(self):
         return None
 
+    def get_val_memory(self):
+        return None
+
     def eval(self):
         raise NotImplementedError
 
@@ -72,3 +75,11 @@ class IncrementalLearner(abc.ABC):
     @property
     def _new_task_index(self):
         return self._task * self._task_size
+
+    @property
+    def inc_dataset(self):
+        return self.__inc_dataset
+
+    @inc_dataset.setter
+    def inc_dataset(self, inc_dataset):
+        self.__inc_dataset = inc_dataset
