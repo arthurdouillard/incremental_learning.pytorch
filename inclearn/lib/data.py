@@ -4,15 +4,27 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
-from torch.utils.data.sampler import SubsetRandomSampler
 from torchvision import datasets, transforms
 
-# --------
-# Datasets
-# --------
+from inclearn.lib import utils
 
 
 class IncrementalDataset:
+    """Incremental generator of datasets.
+
+    :param dataset_name: Among a list of available dataset, that can easily
+                         be defined (see at file's end).
+    :param random_order: Shuffle the class ordering, else use a cherry-picked
+                         ordering.
+    :param shuffle: Shuffle batch order between epochs.
+    :param workers: Number of workers loading the data.
+    :param batch_size: The batch size.
+    :param seed: Seed to force determinist class ordering.
+    :param increment: Number of class to add at each task.
+    :param validation_split: Percent of training data to allocate for validation.
+    :param onehot: Returns targets encoded as onehot vectors instead of scalars.
+                   Memory is expected to be already given in an onehot format.
+    """
 
     def __init__(
         self,
@@ -23,7 +35,8 @@ class IncrementalDataset:
         batch_size=128,
         seed=1,
         increment=10,
-        validation_split=0.
+        validation_split=0.,
+        onehot=False
     ):
         datasets = _get_datasets(dataset_name)
         self._setup_data(
@@ -41,12 +54,13 @@ class IncrementalDataset:
         self._batch_size = batch_size
         self._workers = workers
         self._shuffle = shuffle
+        self._onehot = onehot
 
     @property
     def n_tasks(self):
         return len(self.increments)
 
-    def new_task(self, memory=None):
+    def new_task(self, memory=None, memory_val=None):
         if self._current_task >= len(self.increments):
             raise Exception("No more tasks.")
 
@@ -60,15 +74,29 @@ class IncrementalDataset:
         )
         x_test, y_test = self._select(self.data_test, self.targets_test, high_range=max_class)
 
-        if memory is not None:
-            data_memory, targets_memory = memory
-            print("Set memory of size: {}.".format(data_memory.shape[0]))
-            x_train = np.concatenate((x_train, data_memory))
-            y_train = np.concatenate((y_train, targets_memory))
+        if self._onehot:
 
-        train_loader = self._get_loader(x_train, y_train, mode="train")
-        val_loader = self._get_loader(x_val, y_val, mode="train") if len(x_val) > 0 else None
-        test_loader = self._get_loader(x_test, y_test, mode="test")
+            def to_onehot(x):
+                n = np.max(x) + 1
+                return np.eye(n)[x]
+
+            y_train = to_onehot(y_train)
+
+        if memory is not None:
+            print("Set memory of size: {}.".format(memory[0].shape[0]))
+            x_train, y_train, train_memory_flags = self._add_memory(x_train, y_train, *memory)
+        else:
+            train_memory_flags = np.zeros((x_train.shape[0],))
+        if memory_val is not None:
+            print("Set validation memory of size: {}.".format(memory_val[0].shape[0]))
+            x_val, y_val, val_memory_flags = self._add_memory(x_val, y_val, *memory_val)
+        else:
+            val_memory_flags = np.zeros((x_val.shape[0],))
+
+        train_loader = self._get_loader(x_train, y_train, train_memory_flags, mode="train")
+        val_loader = self._get_loader(x_val, y_val, val_memory_flags,
+                                      mode="train") if len(x_val) > 0 else None
+        test_loader = self._get_loader(x_test, y_test, np.zeros((x_test.shape[0],)), mode="test")
 
         task_info = {
             "min_class": min_class,
@@ -84,7 +112,24 @@ class IncrementalDataset:
 
         return task_info, train_loader, val_loader, test_loader
 
-    def get_custom_loader(self, class_indexes, mode="test", data_source="train"):
+    def _add_memory(self, x, y, data_memory, targets_memory):
+        if self._onehot:  # Need to add dummy zeros to match the number of targets:
+            targets_memory = np.concatenate(
+                (
+                    targets_memory,
+                    np.zeros((targets_memory.shape[0], self.increments[self._current_task]))
+                ),
+                axis=1
+            )
+
+        memory_flags = np.concatenate((np.zeros((x.shape[0],)), np.ones((data_memory.shape[0],))))
+
+        x = np.concatenate((x, data_memory))
+        y = np.concatenate((y, targets_memory))
+
+        return x, y, memory_flags
+
+    def get_custom_loader(self, class_indexes, memory=None, mode="test", data_source="train"):
         """Returns a custom loader.
 
         :param class_indexes: A list of class indexes that we want.
@@ -112,16 +157,33 @@ class IncrementalDataset:
             data.append(class_data)
             targets.append(class_targets)
 
-        data = np.concatenate(data)
-        targets = np.concatenate(targets)
+        if len(data) == 0:
+            assert memory is not None
+        else:
+            data = np.concatenate(data)
+            targets = np.concatenate(targets)
 
-        return data, self._get_loader(data, targets, shuffle=False, mode=mode)
+        if memory is not None:
+            if len(data) > 0:
+                data, targets, memory_flags = self._add_memory(data, targets, *memory)
+            else:
+                data, targets = memory
+                memory_flags = np.ones((data.shape[0],))
+        else:
+            memory_flags = np.zeros((data.shape[0],))
+
+        return data, self._get_loader(data, targets, memory_flags, shuffle=False, mode=mode)
+
+    def get_memory_loader(self, data, targets):
+        return self._get_loader(
+            data, targets, np.ones((data.shape[0],)), shuffle=True, mode="train"
+        )
 
     def _select(self, x, y, low_range=0, high_range=0):
         idxes = np.where(np.logical_and(y >= low_range, y < high_range))[0]
         return x[idxes], y[idxes]
 
-    def _get_loader(self, x, y, shuffle=True, mode="train"):
+    def _get_loader(self, x, y, memory_flags, shuffle=True, mode="train"):
         if mode == "train":
             trsf = transforms.Compose([*self.train_transforms, *self.common_transforms])
         elif mode == "test":
@@ -134,10 +196,10 @@ class IncrementalDataset:
             raise NotImplementedError("Unknown mode {}.".format(mode))
 
         return DataLoader(
-            DummyDataset(x, y, trsf),
+            DummyDataset(x, y, memory_flags, trsf),
             batch_size=self._batch_size,
             shuffle=shuffle,
-            num_workers=self._workers
+            num_workers=self._workers,
         )
 
     def _setup_data(self, datasets, random_order=False, seed=1, increment=10, validation_split=0.):
@@ -159,12 +221,14 @@ class IncrementalDataset:
             )
             x_test, y_test = test_dataset.data, np.array(test_dataset.targets)
 
-            order = [i for i in range(len(np.unique(y_train)))]
+            order = list(range(len(np.unique(y_train))))
             if random_order:
                 random.seed(seed)  # Ensure that following order is determined by seed:
                 random.shuffle(order)
             elif dataset.class_order is not None:
                 order = dataset.class_order
+
+            print("Dataset {}: class ordering: {}.".format(dataset, order))
 
             self.class_order.append(order)
 
@@ -234,20 +298,24 @@ class IncrementalDataset:
 
 class DummyDataset(torch.utils.data.Dataset):
 
-    def __init__(self, x, y, trsf):
+    def __init__(self, x, y, memory_flags, trsf):
         self.x, self.y = x, y
+        self.memory_flags = memory_flags
         self.trsf = trsf
+
+        assert x.shape[0] == y.shape[0] == memory_flags.shape[0]
 
     def __len__(self):
         return self.x.shape[0]
 
     def __getitem__(self, idx):
         x, y = self.x[idx], self.y[idx]
+        memory_flag = self.memory_flags[idx]
 
-        x = Image.fromarray(x)
+        x = Image.fromarray(x.astype("uint8"))
         x = self.trsf(x)
 
-        return x, y
+        return x, y, memory_flag
 
 
 def _get_datasets(dataset_names):
@@ -291,7 +359,7 @@ class iCIFAR100(iCIFAR10):
         transforms.ToTensor(),
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
     ]
-    class_order = [
+    class_order = [  # Taken from original iCaRL implementation:
         87, 0, 52, 58, 44, 91, 68, 97, 51, 15, 94, 92, 10, 72, 49, 78, 61, 14, 8, 86, 84, 96, 18,
         24, 32, 45, 88, 11, 4, 67, 69, 66, 77, 47, 79, 93, 29, 50, 57, 83, 17, 81, 41, 12, 37, 59,
         25, 20, 80, 73, 1, 28, 6, 46, 62, 82, 53, 9, 31, 75, 38, 63, 33, 74, 27, 22, 36, 3, 16, 21,
