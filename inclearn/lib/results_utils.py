@@ -5,21 +5,19 @@ import os
 
 import matplotlib.pyplot as plt
 
-from inclearn.lib import utils
-
 
 def get_template_results(args):
     return {"config": args, "results": []}
 
 
-def save_results(results, label):
+def save_results(results, label, model, date):
     del results["config"]["device"]
 
-    folder_path = os.path.join("results", "{}_{}".format(utils.get_date(), label))
+    folder_path = os.path.join("results", "dev", model, "{}_{}".format(date, label))
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
-    file_path = "{}_{}_.json".format(utils.get_date(), results["config"]["seed"])
+    file_path = "seed_{}_.json".format(results["config"]["seed"])
     with open(os.path.join(folder_path, file_path), "w+") as f:
         json.dump(results, f, indent=2)
 
@@ -140,7 +138,7 @@ def plot(results, increment, total, title="", path_to_save=None):
 
     for result in results:
         path = result["path"]
-        label = result.get("label", path)
+        label = result.get("label", path.split("/")[-1])
         from_paper = "[paper] " if result.get("from_paper", False) else "[me]     "
         avg_inc = result.get("average_incremental", False)
         skip_first = result.get("skip_first", False)
