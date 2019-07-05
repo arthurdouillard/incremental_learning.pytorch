@@ -9,41 +9,54 @@ from inclearn.lib import factory
 class BasicNet(nn.Module):
 
     def __init__(
-        self, convnet_type, use_bias=False, init="kaiming", use_multi_fc=False, device=None
+        self,
+        convnet_type,
+        use_bias=False,
+        init="kaiming",
+        use_multi_fc=False,
+        cosine_similarity=False,
+        scaling_factor=False,
+        device=None,
+        return_features=False
     ):
         super(BasicNet, self).__init__()
 
-        self.use_bias = use_bias
-        self.init = init
-        self.use_multi_fc = use_multi_fc
+        if scaling_factor:
+            self.post_processor = LearnedScaler()
+        else:
+            self.post_processor = None
 
         self.convnet = factory.get_convnet(convnet_type, nf=64, zero_init_residual=True)
-        self.classifier = None
 
-        self.n_classes = 0
+        if cosine_similarity:
+            self.classifier = CosineClassifier(self.convnet.out_dim, device)
+        else:
+            self.classifier = Classifier(self.convnet.out_dim, use_bias, use_multi_fc, init, device)
+
+        self.return_features = return_features
         self.device = device
 
         self.to(self.device)
 
     def forward(self, x):
-        if self.classifier is None:
-            raise Exception("Add some classes before training.")
-
         features = self.convnet(x)
+        logits = self.classifier(features)
 
-        if self.use_multi_fc:
-            logits = []
-            for classifier in self.classifier:
-                logits.append(classifier(features))
-            logits = torch.cat(logits, 1)
-        else:
-            logits = self.classifier(features)
-
+        if self.return_features:
+            return features, logits
         return logits
+
+    def post_process(self, x):
+        if self.post_processor is None:
+            return x
+        return self.post_processor(x)
 
     @property
     def features_dim(self):
         return self.convnet.out_dim
+
+    def add_classes(self, n_classes):
+        self.classifier.add_classes(n_classes)
 
     def extract(self, x):
         return self.convnet(x)
@@ -57,6 +70,39 @@ class BasicNet(nn.Module):
 
     def copy(self):
         return copy.deepcopy(self)
+
+    @property
+    def n_classes(self):
+        return self.classifier.n_classes
+
+
+class Classifier(nn.Module):
+    def __init__(self, features_dim, use_bias, use_multi_fc, init, device):
+        super().__init__()
+
+        self.features_dim = features_dim
+        self.use_bias = use_bias
+        self.use_multi_fc = use_multi_fc
+        self.init = init
+        self.device = device
+
+        self.n_classes = 0
+
+        self.classifier = None
+
+    def forward(self, features):
+        if self.classifier is None:
+            raise Exception("Add some classes before training.")
+
+        if self.use_multi_fc:
+            logits = []
+            for classifier in self.classifier:
+                logits.append(classifier(features))
+            logits = torch.cat(logits, 1)
+        else:
+            logits = self.classifier(features)
+
+        return logits
 
     def add_classes(self, n_classes):
         if self.use_multi_fc:
@@ -90,7 +136,7 @@ class BasicNet(nn.Module):
         self.classifier = classifier
 
     def _gen_classifier(self, n_classes):
-        classifier = nn.Linear(self.convnet.out_dim, n_classes, bias=self.use_bias).to(self.device)
+        classifier = nn.Linear(self.features_dim, n_classes, bias=self.use_bias).to(self.device)
         if self.init == "kaiming":
             nn.init.kaiming_normal_(classifier.weight, nonlinearity="linear")
         if self.use_bias:
@@ -98,6 +144,51 @@ class BasicNet(nn.Module):
 
         return classifier
 
+
+class CosineClassifier(nn.Module):
+    def __init__(self, features_dim, device):
+        super().__init__()
+
+        self.n_classes = 0
+        self.weights = None
+        self.features_dim = features_dim
+
+        self.device = device
+
+    def forward(self, features):
+        features_norm = features / (features.norm(dim=1)[:, None] + 1e-8)
+        weights_norm = self.weights / (self.weights.norm(dim=1)[:, None] + 1e-8)
+
+        similarities = torch.mm(features_norm, weights_norm.transpose(0, 1))
+
+        return similarities
+
+    def add_classes(self, n_classes):
+        new_weights = nn.Parameter(torch.zeros(self.n_classes + n_classes, self.features_dim))
+        nn.init.kaiming_normal_(new_weights, nonlinearity="linear")
+
+        if self.weights is not None:
+            new_weights.data[:self.n_classes] = copy.deepcopy(self.weights.data)
+
+        del self.weights
+        self.weights = new_weights
+        self.to(self.device)
+        self.n_classes += n_classes
+
+
+class LearnedScaler(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.scale = nn.Parameter(torch.tensor(1.))
+
+    def forward(self, inputs):
+        return self.scale * inputs
+
+
+# -------------
+# Recalibration
+# -------------
 
 class CalibrationWrapper(nn.Module):
     """Wraps several calibration models, each being applied on different targets."""
@@ -161,6 +252,7 @@ class TemperatureScaling(nn.Module):
 
     See https://arxiv.org/abs/1706.04599.
     """
+
     def __init__(self, temperature=1):
         super().__init__()
 
