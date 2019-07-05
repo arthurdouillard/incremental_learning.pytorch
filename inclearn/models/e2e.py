@@ -1,11 +1,9 @@
 import numpy as np
 import torch
 import tqdm
-from torch import nn
 from torch.nn import functional as F
 
-from inclearn import factory, utils
-from inclearn.lib import callbacks, network
+from inclearn.lib import factory, herding, network, utils
 from inclearn.models.base import IncrementalLearner
 
 tqdm.monitor_interval = 0
@@ -22,12 +20,12 @@ class End2End(IncrementalLearner):
 
         self._device = args["device"]
         self._opt_name = args["optimizer"]
-        self._lr = args["lr"]
-        self._weight_decay = args["weight_decay"]
-        self._n_epochs = args["epochs"]
+        #self._lr = args["lr"]
+        #self._weight_decay = args["weight_decay"]
+        #self._n_epochs = args["epochs"]
 
-        self._scheduling = args["scheduling"]
-        self._lr_decay = args["lr_decay"]
+        #self._scheduling = args["scheduling"]
+        #self._lr_decay = args["lr_decay"]
 
         self._k = args["memory_size"]
         self._n_classes = 0
@@ -37,7 +35,7 @@ class End2End(IncrementalLearner):
         self._network = network.BasicNet(args["convnet"], use_bias=True, use_multi_fc=True,
                                          device=self._device)
 
-        self._examplars = {}
+        self._data_memory, self._targets_memory = {}, {}
         self._old_model = []
 
         self._task_idxes = []
@@ -66,7 +64,7 @@ class End2End(IncrementalLearner):
         self._task_idxes.append([self._n_classes + i for i in range(self._task_size)])
 
         self._n_classes += self._task_size
-        print("Now {} examplars per class.".format(self._m))
+        print("Now {} examplars per class.".format(self._memory_per_class))
 
     def _train_task(self, train_loader, val_loader):
         """Train & fine-tune model.
@@ -83,7 +81,7 @@ class End2End(IncrementalLearner):
         """
         if self._task == 0:
             epochs = 90
-            optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.1, 0.001)
+            optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.1, 0.0001)
             scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 60], gamma=0.1)
             self._train(train_loader, val_loader, epochs, optimizer, scheduler)
             return
@@ -92,7 +90,7 @@ class End2End(IncrementalLearner):
         print("Training")
         self._finetuning = False
         epochs = 60
-        optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.1, 0.001)
+        optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.1, 0.0001)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [40, 50], gamma=0.1)
         self._train(train_loader, val_loader, epochs, optimizer, scheduler)
 
@@ -101,17 +99,16 @@ class End2End(IncrementalLearner):
         self._old_model = self._network.copy().freeze()
 
         self._finetuning = True
-        self._build_examplars(train_loader,
-                              n_examplars=self._k // (self._n_classes - self._task_size))
-        train_loader.dataset.set_idxes(self.examplars)  # Fine-tuning only on balanced dataset
+        self._build_examplars(n_examplars=self._k // (self._n_classes - self._task_size))
 
-        optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.01, 0.001)
+        loader = self.inc_dataset.get_memory_loader(*self.get_memory())
+        optimizer = factory.get_optimizer(self._network.parameters(), self._opt_name, 0.01, 0.0001)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 20], gamma=0.1)
-        self._train(train_loader, val_loader, 40, optimizer, scheduler)
+        self._train(loader, val_loader, 40, optimizer, scheduler)
 
-    def _after_task(self, data_loader):
+    def _after_task(self, inc_dataset):
         self._reduce_examplars()
-        self._build_examplars(data_loader)
+        self._build_examplars()
 
         self._old_model = self._network.copy().freeze()
 
@@ -121,26 +118,31 @@ class End2End(IncrementalLearner):
 
         return ypred, ytrue
 
-    def get_memory_indexes(self):
-        return self.examplars
+    def get_memory(self):
+        data = np.concatenate(list(self._data_memory.values()))
+        targets = np.concatenate(list(self._targets_memory.values()))
+
+        return data, targets
 
     # -----------
     # Private API
     # -----------
 
     def _train(self, train_loader, val_loader, n_epochs, optimizer, scheduler):
+        for p in self._network.parameters():
+            p.register_hook(lambda grad: torch.clamp(grad, -2., 2.))
+
         self._callbacks = [
-            callbacks.GaussianNoiseAnnealing(self._network.parameters()),
+            #callbacks.GaussianNoiseAnnealing(self._network.parameters()),
             #callbacks.EarlyStopping(self._network, minimize_metric=False)
         ]
         self._best_acc = float("-inf")
 
         print("nb ", len(train_loader.dataset))
-        prog_bar = tqdm.trange(n_epochs, desc="Losses.")
 
         val_acc = 0.
         train_acc = 0.
-        for epoch in prog_bar:
+        for epoch in range(n_epochs):
             for cb in self._callbacks:
                 cb.on_epoch_begin()
 
@@ -149,7 +151,9 @@ class End2End(IncrementalLearner):
             _clf_loss, _distil_loss = 0., 0.
             c = 0
 
-            for i, ((_, idxes), inputs, targets) in enumerate(train_loader, start=1):
+            prog_bar = tqdm.tqdm(enumerate(train_loader, start=1), desc="Losses.")
+
+            for i, (inputs, targets, _) in prog_bar:
                 optimizer.zero_grad()
 
                 c += 1
@@ -159,8 +163,7 @@ class End2End(IncrementalLearner):
                 clf_loss, distil_loss = self._compute_loss(
                     inputs,
                     logits,
-                    targets,
-                    idxes,
+                    targets
                 )
 
                 if not utils._check_loss(clf_loss) or not utils._check_loss(distil_loss):
@@ -169,11 +172,14 @@ class End2End(IncrementalLearner):
 
                 loss = clf_loss + distil_loss
 
-                loss.backward()
+                loss.backward(retain_graph=True)
 
-                #if self._task != 0:
-                #    for param in self._network.parameters():
-                #        param.grad = param.grad * (self._temperature ** 2)
+                #l2reg_grad = 0.
+                #for p in self._network.parameters():
+                #    l2reg_grad += 0.0001 * p.grad.norm()
+                #loss += l2reg_grad
+                #loss.backward()
+
                 for cb in self._callbacks:
                     cb.before_step()
                 optimizer.step()
@@ -183,7 +189,9 @@ class End2End(IncrementalLearner):
 
                 if i % 10 == 0 or i >= len(train_loader):
                     prog_bar.set_description(
-                        "Clf: {}; Distill: {}; Train: {}; Val: {}".format(
+                        "Task {}/{}; Epoch {}/{}: Clf: {}; Distill: {}; Train: {}; Val: {}".format(
+                            self._task + 1, self._n_tasks,
+                            epoch + 1, n_epochs,
                             round(clf_loss.item(), 3), round(distil_loss.item(), 3),
                             round(train_acc, 3),
                             round(val_acc, 3)
@@ -213,21 +221,21 @@ class End2End(IncrementalLearner):
                     self._network = cb.network
                     return
 
-        print("best", self._best_acc)
-
-    def _compute_loss(self, inputs, logits, targets, idxes):
+    def _compute_loss(self, inputs, logits, targets):
         """Computes the classification loss & the distillation loss.
 
         Distillation loss is null at the first task.
 
         :param logits: Logits produced the model.
         :param targets: The targets.
-        :param idxes: The real indexes of the just-processed images. Needed to
-                      match the previous predictions.
         :return: A tuple of the classification loss and the distillation loss.
         """
         clf_loss = F.cross_entropy(logits, targets)
 
+        if clf_loss.item() > 100:
+            import pdb; pdb.set_trace()
+
+        #return clf_loss, torch.zeros(1, device=self._device)
         if self._task == 0:
             distil_loss = torch.zeros(1, device=self._device)
         else:
@@ -235,20 +243,38 @@ class End2End(IncrementalLearner):
                 # We only do distillation on current task during the distillation
                 # phase:
                 last_index = len(self._task_idxes)
+                n = self._n_classes
             else:
                 last_index = len(self._task_idxes) - 1
+                n = self._n_classes - self._task_size
 
             distil_loss = 0.
-            #with torch.no_grad():
-            previous_logits = self._old_model(inputs)
+            with torch.no_grad():
+                previous_logits = self._old_model(inputs)
+
+            #distil_loss = F.binary_cross_entropy(
+            #    F.softmax(logits[..., list(range(n))], dim=1) ** (1 / self._temperature),
+            #    F.softmax(previous_logits[..., list(range(n))], dim=1) ** (1 / self._temperature)
+            #)
 
             for i in range(last_index):
                 task_idxes = self._task_idxes[i]
 
+                task_prob_new = F.softmax(logits[..., task_idxes], dim=1)
+                task_prob_old = F.softmax(previous_logits[..., task_idxes], dim=1)
+
+                task_prob_new = task_prob_new ** (1 / self._temperature)
+                task_prob_old = task_prob_old ** (1 / self._temperature)
+
+                task_prob_new = task_prob_new / task_prob_new.sum(1).view(-1, 1)
+                task_prob_old = task_prob_old / task_prob_old.sum(1).view(-1, 1)
+
                 distil_loss += F.binary_cross_entropy(
-                    F.softmax(logits[..., task_idxes] / self._temperature, dim=1),
-                    F.softmax(previous_logits[..., task_idxes] / self._temperature, dim=1)
+                    task_prob_new,
+                    task_prob_old
                 )
+
+            distil_loss *= 1 / last_index
 
         return clf_loss, distil_loss
 
@@ -278,7 +304,7 @@ class End2End(IncrementalLearner):
         ypred = []
         ytrue = []
 
-        for _, inputs, targets in loader:
+        for inputs, targets, _ in loader:
             inputs = inputs.to(self._device)
             logits = F.softmax(self._network(inputs), dim=1)
             preds = logits.argmax(dim=1).cpu().numpy()
@@ -289,100 +315,45 @@ class End2End(IncrementalLearner):
         return np.array(ypred), np.array(ytrue)
 
     @property
-    def _m(self):
+    def _memory_per_class(self):
         """Returns the number of examplars per class."""
         return self._k // self._n_classes
 
-    def _extract_features(self, loader):
-        features = []
-        idxes = []
-
-        for (real_idxes, _), inputs, _ in loader:
-            inputs = inputs.to(self._device)
-            features.append(self._network.extract(inputs).detach())
-            idxes.extend(real_idxes.numpy().tolist())
-
-        features = torch.cat(features)
-        mean = torch.mean(features, dim=0, keepdim=False)
-
-        return features, mean, idxes
-
-    @staticmethod
-    def _get_closest(centers, features):
-        """Returns the center index being the closest to each feature.
-
-        :param centers: Centers to compare, in this case the class means.
-        :param features: A tensor of features extracted by the convnet.
-        :return: A numpy array of the closest centers indexes.
-        """
-        pred_labels = []
-
-        features = features
-        for feature in features:
-            distances = End2End._dist(centers, feature)
-            pred_labels.append(distances.argmin().item())
-
-        return np.array(pred_labels)
-
-    @staticmethod
-    def _dist(a, b):
-        """Computes L2 distance between two tensors.
-
-        :param a: A tensor.
-        :param b: A tensor.
-        :return: A tensor of distance being of the shape of the "biggest" input
-                 tensor.
-        """
-        return torch.pow(a - b, 2).sum(-1)
-
-    def _build_examplars(self, loader, n_examplars=None):
+    def _build_examplars(self, n_examplars=None):
         """Builds new examplars.
 
-        :param loader: A DataLoader.
+        :param loader: An incremental dataset.
         :param n_examplars: Maximum number of examplars to create.
+        :return: The memory data and the associated targets.
         """
-        n_examplars = n_examplars or self._m
+        n_examplars = n_examplars or self._memory_per_class
 
-        lo, hi = self._task * self._task_size, self._n_classes
+        lo, hi = self._n_classes - self._task_size, self._n_classes
         print("Building examplars for classes {} -> {}.".format(lo, hi))
         for class_idx in range(lo, hi):
-            loader.dataset.set_classes_range(class_idx, class_idx)
-            self._examplars[class_idx] = self._build_class_examplars(loader, n_examplars)
+            inputs, loader = self.inc_dataset.get_custom_loader(class_idx, mode="test")
+            features, targets = extract_features(self._network, loader)
 
-    def _build_class_examplars(self, loader, n_examplars):
-        """Build examplars for a single class.
+            indexes = herding.closest_to_mean(features, n_examplars)
 
-        Examplars are selected as the closest to the class mean.
-
-        :param loader: DataLoader that provides images for a single class.
-        :param n_examplars: Maximum number of examplars to create.
-        :return: The real indexes of the chosen examplars.
-        """
-        features, class_mean, idxes = self._extract_features(loader)
-
-        class_mean = F.normalize(class_mean, dim=0)
-        features = F.normalize(features, dim=1)
-        distances_to_mean = self._dist(class_mean, features)
-
-        nb_examplars = min(n_examplars, len(features))
-
-        fake_idxes = distances_to_mean.argsort().cpu().numpy()[:nb_examplars]
-        return [idxes[idx] for idx in fake_idxes]
-
-    @property
-    def examplars(self):
-        """Returns all the real examplars indexes.
-
-        :return: A numpy array of indexes.
-        """
-        return np.array(
-            [
-                examplar_idx for class_examplars in self._examplars.values()
-                for examplar_idx in class_examplars
-            ]
-        )
+            self._data_memory[class_idx] = inputs[indexes]
+            self._targets_memory[class_idx] = targets[indexes]
 
     def _reduce_examplars(self):
         print("Reducing examplars.")
-        for class_idx in range(len(self._examplars)):
-            self._examplars[class_idx] = self._examplars[class_idx][:self._m]
+        for class_idx in self._data_memory.keys():
+            self._data_memory[class_idx] = self._data_memory[class_idx][:self._memory_per_class]
+            self._targets_memory[class_idx] = self._targets_memory[class_idx][:self._memory_per_class]
+
+
+def extract_features(model, loader):
+    targets, features = [], []
+
+    for _inputs, _targets, _ in loader:
+        _targets = _targets.numpy()
+        _features = model.extract(_inputs.to(model.device)).detach().cpu().numpy()
+
+        features.append(_features)
+        targets.append(_targets)
+
+    return np.concatenate(features), np.concatenate(targets)
