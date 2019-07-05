@@ -31,24 +31,8 @@ def calibrate(network, loader, device, indexes, calibration_type="linear"):
 
     return calibration_wrapper
 
-class LinearModelBis(nn.Module):
-    def __init__(self, start_index, alpha=1., beta=0.):
-        super().__init__()
-
-        self.alpha = nn.Parameter(torch.tensor(alpha))
-        self.beta = nn.Parameter(torch.tensor(beta))
-        self.start = start_index
-
-    def forward(self, inputs):
-        return torch.cat((
-            inputs[..., :self.start],
-            self.alpha * inputs[..., self.start:] + self.beta
-        ), dim=1)
 
 def _get_calibration_model(indexes, calibration_type):
-    #print("start idx", indexes[0][0])
-    #return LinearModelBis(indexes[0][0])
-
     calibration_wrapper = CalibrationWrapper()
 
     for start_index, end_index in indexes:
@@ -69,7 +53,7 @@ def _extract_data(network, loader, device):
     labels = []
 
     with torch.no_grad():
-        for inputs, targets in loader:
+        for inputs, targets, _ in loader:
             logits.append(network(inputs.to(device)))
             labels.append(targets.to(device))
 
