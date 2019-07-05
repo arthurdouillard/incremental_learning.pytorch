@@ -1,0 +1,11 @@
+model: icarl
+convnet: rebuffi
+
+lr: 2.
+weight_decay: 0.00005
+scheduling:
+  - 49
+  - 63
+lr_decay: 0.2
+optimizer: sgd
+epochs: 70

@@ -1,27 +1,33 @@
 import copy
+import os
 import random
 import time
 
 import numpy as np
 import torch
+import yaml
 
 from inclearn.lib import factory, results_utils, utils
 
 
 def train(args):
+    _set_up_options(args)
+
     seed_list = copy.deepcopy(args["seed"])
     device = copy.deepcopy(args["device"])
+
+    start_date = utils.get_date()
 
     for seed in seed_list:
         args["seed"] = seed
         args["device"] = device
 
         start_time = time.time()
-        _train(args)
+        _train(args, start_date)
         print("Training finished in {}s.".format(int(time.time() - start_time)))
 
 
-def _train(args):
+def _train(args, start_date):
     _set_seed(args["seed"])
 
     factory.set_device(args)
@@ -30,13 +36,14 @@ def _train(args):
     args["classes_order"] = inc_dataset.class_order
 
     model = factory.get_model(args)
+    model.inc_dataset = inc_dataset
 
     results = results_utils.get_template_results(args)
 
-    memory = None
+    memory, memory_val = None, None
 
     for _ in range(inc_dataset.n_tasks):
-        task_info, train_loader, val_loader, test_loader = inc_dataset.new_task(memory)
+        task_info, train_loader, val_loader, test_loader = inc_dataset.new_task(memory, memory_val)
         if task_info["task"] == args["max_task"]:
             break
 
@@ -64,6 +71,7 @@ def _train(args):
         results["results"].append(acc_stats)
 
         memory = model.get_memory()
+        memory_val = model.get_val_memory()
 
     print(
         "Average Incremental Accuracy: {}.".format(
@@ -71,8 +79,8 @@ def _train(args):
         )
     )
 
-    if args["name"]:
-        results_utils.save_results(results, args["name"])
+    if args["name"] is not None:
+        results_utils.save_results(results, args["name"], args["model"], start_date)
 
     del model
     del inc_dataset
@@ -86,3 +94,16 @@ def _set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True  # This will slow down training.
+
+
+def _set_up_options(args):
+    options_paths = args["options"] or []
+
+    for option_path in options_paths:
+        if not os.path.exists(option_path):
+            raise IOError("Not found options file {}.".format(option_path))
+
+        with open(option_path) as f:
+            options = yaml.load(f, Loader=yaml.FullLoader)
+
+        args.update(options)

@@ -1,0 +1,11 @@
+model: ucir
+convnet: rebuffi
+
+lr: 0.1
+weight_decay: 0.00005
+scheduling:
+  - 80
+  - 120
+lr_decay: 0.1
+optimizer: sgd
+epochs: 160
