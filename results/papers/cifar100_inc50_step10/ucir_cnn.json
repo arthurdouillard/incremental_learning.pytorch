@@ -1,0 +1,24 @@
+{
+    "config": {},
+    "results": [
+        {
+            "total": 0.76
+        },
+        {
+            "total": 0.69
+        },
+        {
+            "total": 0.64
+        },
+        {
+            "total": 0.60
+        },
+        {
+            "total": 0.56
+        },
+        {
+            "total": 0.54
+        }
+    ],
+    "average_incremental_accuracy": 0.6342
+}
