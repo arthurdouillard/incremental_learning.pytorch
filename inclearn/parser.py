@@ -20,6 +20,8 @@ def get_parser():
                         help="Max number of storable examplars.")
     parser.add_argument("-temp", "--temperature", default=1, type=int,
                         help="Temperature used to soften the predictions.")
+    parser.add_argument("-fixed-memory", "--fixed-memory", action="store_true",
+                        help="Instead of shrinking the memory, it's already at minimum.")
 
     # Data related:
     parser.add_argument("-d", "--dataset", default="cifar100", type=str,
@@ -38,6 +40,8 @@ def get_parser():
                         help="Cap the number of tasks.")
     parser.add_argument("-onehot", "--onehot", action="store_true",
                         help="Return data in onehot format.")
+    parser.add_argument("-initial-increment", "--initial-increment", default=None, type=int,
+                        help="Initial increment, may be bigger.")
 
     # Training related:
     parser.add_argument("-lr", "--lr", default=2., type=float,
