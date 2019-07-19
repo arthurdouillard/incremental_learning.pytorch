@@ -11,7 +11,6 @@ class MetricLogger:
         pass
 
 
-
 def compute_metrics(ypred, ytrue, task_size=10):
     metrics = {}
 

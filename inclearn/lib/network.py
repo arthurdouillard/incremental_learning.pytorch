@@ -1,9 +1,11 @@
 import copy
+import math
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
-from inclearn.lib import factory
+from inclearn.lib import factory, utils
 
 
 class BasicNet(nn.Module):
@@ -11,13 +13,16 @@ class BasicNet(nn.Module):
     def __init__(
         self,
         convnet_type,
+        convnet_kwargs={},
         use_bias=False,
         init="kaiming",
         use_multi_fc=False,
         cosine_similarity=False,
         scaling_factor=False,
         device=None,
-        return_features=False
+        return_features=False,
+        extract_no_act=False,
+        classifier_no_act=False
     ):
         super(BasicNet, self).__init__()
 
@@ -26,23 +31,33 @@ class BasicNet(nn.Module):
         else:
             self.post_processor = None
 
-        self.convnet = factory.get_convnet(convnet_type, nf=64, zero_init_residual=True)
+        self.convnet = factory.get_convnet(convnet_type, **convnet_kwargs)
 
+        self.cosine_similarity = cosine_similarity
         if cosine_similarity:
             self.classifier = CosineClassifier(self.convnet.out_dim, device)
         else:
             self.classifier = Classifier(self.convnet.out_dim, use_bias, use_multi_fc, init, device)
 
         self.return_features = return_features
+        self.extract_no_act = extract_no_act
+        self.classifier_no_act = classifier_no_act
         self.device = device
+
+        if self.extract_no_act:
+            print("Features will be extracted without the last ReLU.")
+        if self.classifier_no_act:
+            print("No ReLU will be applied on features before feeding the classifier.")
 
         self.to(self.device)
 
     def forward(self, x):
-        features = self.convnet(x)
-        logits = self.classifier(features)
+        raw_features, features = self.convnet(x)
+        logits = self.classifier(raw_features if self.classifier_no_act else features)
 
         if self.return_features:
+            if self.extract_no_act:
+                return raw_features, logits
             return features, logits
         return logits
 
@@ -58,8 +73,14 @@ class BasicNet(nn.Module):
     def add_classes(self, n_classes):
         self.classifier.add_classes(n_classes)
 
+    def add_imprinted_classes(self, class_indexes, inc_dataset):
+        return self.classifier.add_imprinted_classes(class_indexes, inc_dataset, self)
+
     def extract(self, x):
-        return self.convnet(x)
+        raw_features, features = self.convnet(x)
+        if self.extract_no_act:
+            return raw_features
+        return features
 
     def freeze(self):
         for param in self.parameters():
@@ -156,15 +177,20 @@ class CosineClassifier(nn.Module):
         self.device = device
 
     def forward(self, features):
+        #features_normalized = F.normalize(features, p=2, dim=1)
+        #weights_normalized = F.normalize(self.weights, p=2, dim=1)
+#
+        #return F.linear(features_normalized, weights_normalized)
         features_norm = features / (features.norm(dim=1)[:, None] + 1e-8)
         weights_norm = self.weights / (self.weights.norm(dim=1)[:, None] + 1e-8)
-
         similarities = torch.mm(features_norm, weights_norm.transpose(0, 1))
-
         return similarities
 
     def add_classes(self, n_classes):
         new_weights = nn.Parameter(torch.zeros(self.n_classes + n_classes, self.features_dim))
+
+        #stdv = 1. / math.sqrt(self.features_dim)
+        #new_weights.data.uniform_(-stdv, stdv)
         nn.init.kaiming_normal_(new_weights, nonlinearity="linear")
 
         if self.weights is not None:
@@ -175,12 +201,39 @@ class CosineClassifier(nn.Module):
         self.to(self.device)
         self.n_classes += n_classes
 
+        return self
+
+    def add_imprinted_classes(self, class_indexes, inc_dataset, network):
+        # We are assuming the class indexes are contiguous!
+        n_classes = self.n_classes
+        self.add_classes(len(class_indexes))
+        if n_classes == 0:
+            return
+
+        weights_norm = self.weights.data.norm(dim=1, keepdim=True)
+        avg_weights_norm = torch.mean(weights_norm, dim=0).cpu()
+
+        new_weights = []
+        for class_index in class_indexes:
+            _, loader = inc_dataset.get_custom_loader([class_index])
+            features, _ = utils.extract_features(network, loader)
+
+            features_normalized = F.normalize(torch.from_numpy(features), p=2, dim=1)
+            class_embeddings = torch.mean(features_normalized, dim=0)
+            new_weights.append(
+                F.normalize(class_embeddings, p=2, dim=0) * avg_weights_norm
+            )
+
+        new_weights = torch.stack(new_weights)
+        self.weights.data[-len(class_indexes):] = new_weights.to(self.device)
+        return self
+
 
 class LearnedScaler(nn.Module):
-    def __init__(self):
+    def __init__(self, initial_value=1.):
         super().__init__()
 
-        self.scale = nn.Parameter(torch.tensor(1.))
+        self.scale = nn.Parameter(torch.tensor(initial_value))
 
     def forward(self, inputs):
         return self.scale * inputs

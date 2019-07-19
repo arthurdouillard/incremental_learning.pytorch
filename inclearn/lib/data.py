@@ -24,6 +24,9 @@ class IncrementalDataset:
     :param validation_split: Percent of training data to allocate for validation.
     :param onehot: Returns targets encoded as onehot vectors instead of scalars.
                    Memory is expected to be already given in an onehot format.
+    :param initial_increment: Initial increment may be defined if you want to train
+                              on more classes than usual for the first task, like
+                              UCIR does.
     """
 
     def __init__(
@@ -36,7 +39,8 @@ class IncrementalDataset:
         seed=1,
         increment=10,
         validation_split=0.,
-        onehot=False
+        onehot=False,
+        initial_increment=None
     ):
         datasets = _get_datasets(dataset_name)
         self._setup_data(
@@ -44,7 +48,8 @@ class IncrementalDataset:
             random_order=random_order,
             seed=seed,
             increment=increment,
-            validation_split=validation_split
+            validation_split=validation_split,
+            initial_increment=initial_increment
         )
         self.train_transforms = datasets[0].train_transforms  # FIXME handle multiple datasets
         self.common_transforms = datasets[0].common_transforms
@@ -202,7 +207,15 @@ class IncrementalDataset:
             num_workers=self._workers,
         )
 
-    def _setup_data(self, datasets, random_order=False, seed=1, increment=10, validation_split=0.):
+    def _setup_data(
+        self,
+        datasets,
+        random_order=False,
+        seed=1,
+        increment=10,
+        validation_split=0.,
+        initial_increment=None
+    ):
         # FIXME: handles online loading of images
         self.data_train, self.targets_train = [], []
         self.data_test, self.targets_test = [], []
@@ -243,8 +256,13 @@ class IncrementalDataset:
             current_class_idx += len(order)
             if len(datasets) > 1:
                 self.increments.append(len(order))
-            else:
+            elif initial_increment is None:
                 self.increments = [increment for _ in range(len(order) // increment)]
+            else:
+                self.increments = [initial_increment] + [
+                    increment
+                    for _ in range((len(order) // increment) - (initial_increment // increment))
+                ]
 
             self.data_train.append(x_train)
             self.targets_train.append(y_train)

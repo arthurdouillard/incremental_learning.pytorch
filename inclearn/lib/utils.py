@@ -35,3 +35,16 @@ def compute_accuracy(ypred, ytrue, task_size=10):
 
 def get_date():
     return datetime.datetime.now().strftime("%Y%m%d")
+
+
+def extract_features(model, loader):
+    targets, features = [], []
+
+    for _inputs, _targets, _ in loader:
+        _targets = _targets.numpy()
+        _features = model.extract(_inputs.to(model.device)).detach().cpu().numpy()
+
+        features.append(_features)
+        targets.append(_targets)
+
+    return np.concatenate(features), np.concatenate(targets)

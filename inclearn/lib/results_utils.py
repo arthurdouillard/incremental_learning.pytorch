@@ -120,25 +120,27 @@ def get_max_label_length(results):
     return max(len(r.get("label", r["path"])) for r in results)
 
 
-def plot(results, increment, total, title="", path_to_save=None):
+def plot(results, increment, total, initial_increment=None, title="", path_to_save=None):
     """Plotting utilities to visualize several experiments.
 
     :param results: A list of dict composed of a "path", a "label", an optional
                     "average incremental", an optional "skip_first".
     :param increment: The increment of classes per task.
     :param total: The total number of classes.
+    :param initial_increment: Increment initial, default to 0.
     :param title: Plot title.
     :param path_to_save: Optional path where to save the image.
     """
     plt.figure(figsize=(10, 5))
 
-    x = list(range(increment, total + 1, increment))
+    initial_increment = initial_increment or increment
+    x = list(range(initial_increment, total + 1, increment))
 
     max_label_length = get_max_label_length(results) + 4
 
     for result in results:
         path = result["path"]
-        label = result.get("label", path.split("/")[-1])
+        label = result.get("label", path.rstrip("/").split("/")[-1])
         from_paper = "[paper] " if result.get("from_paper", False) else "[me]     "
         avg_inc = result.get("average_incremental", False)
         skip_first = result.get("skip_first", False)
@@ -173,15 +175,15 @@ def plot(results, increment, total, title="", path_to_save=None):
             print(label)
             raise
 
-    plt.legend(loc="upper right")
+    plt.legend(loc="upper right", bbox_to_anchor=(2., 1.0))
     plt.xlabel("Number of classes")
     plt.ylabel("Accuracy over seen classes")
     plt.title(title)
 
-    for i in range(10, total + 1, 10):
+    for i in range(0, total + 1, 10):
         plt.axhline(y=i, color='black', linestyle='dashed', linewidth=1, alpha=0.2)
-    plt.yticks([i for i in range(10, total + 1, 10)])
-    plt.xticks([i for i in range(10, len(x) * increment + 1, 10)])
+    plt.yticks(list(range(10, total + 1, 10)))
+    plt.xticks(list(range(initial_increment, initial_increment + len(x) * increment, increment)))
 
     if path_to_save:
         plt.savefig(path_to_save)

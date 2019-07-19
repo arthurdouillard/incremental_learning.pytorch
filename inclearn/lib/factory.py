@@ -2,7 +2,7 @@ import torch
 from torch import optim
 
 from inclearn import models
-from inclearn.convnet import densenet, my_resnet, resnet
+from inclearn.convnet import densenet, my_resnet, resnet, ucir_resnet
 from inclearn.lib import data
 
 
@@ -20,10 +20,14 @@ def get_convnet(convnet_type, **kwargs):
         return resnet.resnet18(**kwargs)
     elif convnet_type == "resnet34":
         return resnet.resnet34(**kwargs)
+    elif convnet_type == "resnet32":
+        return resnet.resnet32(**kwargs)
     elif convnet_type == "rebuffi":
-        return my_resnet.resnet_rebuffi()
+        return my_resnet.resnet_rebuffi(**kwargs)
     elif convnet_type == "densenet121":
         return densenet.densenet121(**kwargs)
+    elif convnet_type == "ucir":
+        return ucir_resnet.resnet32(**kwargs)
 
     raise NotImplementedError("Unknwon convnet type {}.".format(convnet_type))
 
@@ -41,8 +45,14 @@ def get_model(args):
         return models.FocusForget(args)
     elif args["model"] == "fixed":
         return models.FixedRepresentation(args)
+    elif args["model"] == "bic":
+        return models.BiC(args)
+    elif args["model"] == "icarlmixup":
+        return models.ICarlMixUp(args)
+    elif args["model"] == "ucir":
+        return models.UCIR(args)
 
-    raise NotImplementedError(args["model"])
+    raise NotImplementedError("Unknown model {}.".format(args["model"]))
 
 
 def get_data(args):
@@ -52,7 +62,10 @@ def get_data(args):
         shuffle=True,
         batch_size=args["batch_size"],
         workers=args["workers"],
-        validation_split=args["validation"]
+        validation_split=args["validation"],
+        onehot=args["onehot"],
+        increment=args["increment"],
+        initial_increment=args["initial_increment"]
     )
 
 
