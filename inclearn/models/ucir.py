@@ -3,7 +3,7 @@ import math
 import torch
 from torch.nn import functional as F
 
-from inclearn.lib import network
+from inclearn.lib import factory, network
 from inclearn.models.icarl import ICarl
 
 
@@ -24,15 +24,22 @@ class UCIR(ICarl):
         self._lr_decay = args["lr_decay"]
 
         self._memory_size = args["memory_size"]
+        self._fixed_memory = args["fixed_memory"]
         self._n_classes = 0
+
+        self._use_distil = args.get("distillation_loss", True)
+        self._lambda_schedule = args.get("lambda_schedule", True)
+        self._use_ranking = args.get("ranking_loss", True)
+        self._scaling_factor = args.get("scaling_factor", True)
 
         self._network = network.BasicNet(
             args["convnet"],
-            #convnet_kwargs={"last_relu": False},
             device=self._device,
             cosine_similarity=True,
-            scaling_factor=True,
-            return_features=True
+            scaling_factor=self._scaling_factor,
+            return_features=True,
+            extract_no_act=True,
+            classifier_no_act=True
         )
 
         self._examplars = {}
@@ -43,15 +50,30 @@ class UCIR(ICarl):
         self._clf_loss = F.binary_cross_entropy_with_logits
         self._distil_loss = F.binary_cross_entropy_with_logits
 
-        self._lambda = 5
-        self._nb_negatives = 2
-        self._margin = 0.2
+        self._lambda = args.get("base_lambda", 5)
+        self._nb_negatives = args.get("nb_negatives", 2)
+        self._margin = args.get("ranking_margin", 0.2)
+        self._use_imprinted_weights = args.get("imprinted_weights", True)
 
         self._herding_indexes = []
 
-    @property
-    def _memory_per_class(self):
-        return 20  #self._memory_size // self._n_classes
+    def _before_task(self, train_loader, val_loader):
+        if self._use_imprinted_weights:
+            self._network.add_imprinted_classes(
+                list(range(self._n_classes, self._n_classes + self._task_size)),
+                self.inc_dataset)
+        else:
+            self._network.add_classes(self._task_size)
+        self._n_classes += self._task_size
+        print("Now {} examplars per class.".format(self._memory_per_class))
+
+        self._optimizer = factory.get_optimizer(
+            self._network.parameters(), self._opt_name, self._lr, self._weight_decay
+        )
+
+        self._scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            self._optimizer, self._scheduling, gamma=self._lr_decay
+        )
 
     def _train_task(self, *args, **kwargs):
         for p in self._network.parameters():
@@ -70,9 +92,12 @@ class UCIR(ICarl):
                 old_features, old_logits = self._old_model(inputs)
 
             # Distillation loss fixing the deviation problem:
-            scheduled_lambda = self._lambda * math.sqrt(
-                self._task_size / (self._n_classes - self._task_size)
-            ) / logits.shape[0]
+            if self._lambda_schedule:
+                scheduled_lambda = self._lambda * math.sqrt(
+                    self._n_classes / self._task_size
+                )
+            else:
+                scheduled_lambda = 1.
 
             distil_loss = scheduled_lambda * F.cosine_embedding_loss(
                 features, old_features,
@@ -80,41 +105,36 @@ class UCIR(ICarl):
             )
 
             # Ranking loss maximizing the inter-class separation between old & new:
-            highest_confidence_indexes = logits.argsort(dim=1, descending=True)
+
+            # 1. Fetching from the batch only samples from the batch that belongs
+            #    to old classes:
             old_indexes = targets.lt(self._n_classes - 1)
-            highest_confidence_indexes[old_indexes]
+            old_logits = logits[old_indexes]
+            old_targets = targets[old_indexes]
 
+            # 2. Getting positive values, aka ground-truth's logit predictions:
+            old_values = old_logits[torch.arange(len(old_logits)), old_targets]
+            old_values = old_values.repeat(self._nb_negatives, 1).t().contiguous().view(-1)
 
-            ranking_loss = torch.tensor(0.)
-            for batch_index in range(logits.shape[0]):
-                if not memory_flags[batch_index]:
-                    # Is new class
-                    continue
+            # 3. Getting top-k negative values:
+            nb_old_classes = self._n_classes - self._task_size
+            negative_indexes = old_logits[..., nb_old_classes:].argsort(dim=1, descending=True)[..., :self._nb_negatives] + nb_old_classes
+            new_values = old_logits[torch.arange(len(old_logits)).view(-1, 1), negative_indexes].view(-1)
 
-                class_index = 0
-                counter = 0
-
-                while counter < self._nb_negatives:
-                    if highest_confidence_indexes[batch_index, class_index] > (
-                        self._n_classes - self._task_size
-                    ):
-                        class_index += 1
-                        # Is old class, but we only want new class as positive.
-                        continue
-
-                    positive = logits[batch_index, targets[batch_index]]
-                    negative = logits[batch_index, class_index]
-
-                    ranking_loss += max(self._margin - positive + negative, 0)
-                    counter += 1
-                    class_index += 1
-
-            if memory_flags.to(self._device).sum().item() > 1:
-                ranking_loss *= (1 / memory_flags.to(self._device).sum()).float()
-                distil_loss += ranking_loss
-            # else there was no memory data in this batch.
+            ranking_loss = F.margin_ranking_loss(
+                old_values,
+                new_values,
+                -torch.ones(len(old_values)).to(self._device),
+                margin=self._margin
+            )
         else:
             distil_loss = torch.tensor(0.)
             ranking_loss = torch.tensor(0.)
 
-        return clf_loss + distil_loss + ranking_loss
+        loss = clf_loss
+        if self._use_distil:
+            loss += distil_loss
+        if self._use_ranking:
+            loss += ranking_loss
+
+        return loss
