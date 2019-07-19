@@ -43,6 +43,10 @@ class ResidualBlock(nn.Module):
         self.bn_b = nn.BatchNorm2d(planes)
 
         if increase_dim:
+            #self.downsample = nn.Sequential(
+            #    nn.Conv2d(inplanes, planes, stride=first_stride, kernel_size=1),
+            #    nn.BatchNorm2d(planes),
+            #)
             self.downsample = DownsampleStride()
             self.pad = lambda x: torch.cat((x, x.mul(0)), 1)
         self.last = last
@@ -59,13 +63,7 @@ class ResidualBlock(nn.Module):
             x = self.downsample(x)
             x = self.pad(x)
 
-        if x.shape != y.shape:
-            import pdb; pdb.set_trace()
-
         y = x + y
-
-        if self.last:
-            y = F.relu(y, inplace=True)
 
         return y
 
@@ -104,6 +102,10 @@ class CifarResNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+        for m in self.modules():
+            if isinstance(m, ResidualBlock):
+                nn.init.constant_(m.bn_b.weight, 0)
+
     def _make_layer(self, planes, increase_dim=False, last=False, n=None):
         layers = []
 
@@ -118,15 +120,24 @@ class CifarResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, feature=False, T=1, labels=False, scale=None, keep=None):
+    def forward(self, x):
         x = self.conv_1_3x3(x)
         x = F.relu(self.bn_1(x), inplace=True)
+
         x = self.stage_1(x)
         x = self.stage_2(x)
         x = self.stage_3(x)
         x = self.stage_4(x)
+
+        raw_features = self.end_features(x)
+        features = self.end_features(F.relu(x, inplace=False))
+
+        return raw_features, features
+
+    def end_features(self, x):
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
+
         return x
 
 
