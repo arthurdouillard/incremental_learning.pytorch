@@ -32,8 +32,14 @@ class End2End(IncrementalLearner):
 
         self._temperature = args["temperature"]
 
-        self._network = network.BasicNet(args["convnet"], use_bias=True, use_multi_fc=True,
-                                         device=self._device)
+        self._network = network.BasicNet(
+            args["convnet"],
+            use_bias=True,
+            use_multi_fc=True,
+            device=self._device,
+            extract_no_act=True,
+            classifier_no_act=False
+        )
 
         self._data_memory, self._targets_memory = {}, {}
         self._old_model = []
@@ -251,11 +257,6 @@ class End2End(IncrementalLearner):
             distil_loss = 0.
             with torch.no_grad():
                 previous_logits = self._old_model(inputs)
-
-            #distil_loss = F.binary_cross_entropy(
-            #    F.softmax(logits[..., list(range(n))], dim=1) ** (1 / self._temperature),
-            #    F.softmax(previous_logits[..., list(range(n))], dim=1) ** (1 / self._temperature)
-            #)
 
             for i in range(last_index):
                 task_idxes = self._task_idxes[i]

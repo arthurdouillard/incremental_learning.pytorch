@@ -72,7 +72,7 @@ class BiC(ICarl):
 
         return ypred, ytrue
 
-    def _compute_loss(self, inputs, logits, targets, onehot_targets):
+    def _compute_loss(self, inputs, logits, targets, onehot_targets, memory_flags):
         loss = F.cross_entropy(logits, targets)
 
         if self._old_model is not None:
