@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import random
 import time
@@ -18,13 +19,17 @@ def train(args):
 
     start_date = utils.get_date()
 
+    avg_inc_accs = []
+
     for seed in seed_list:
         args["seed"] = seed
         args["device"] = device
 
         start_time = time.time()
-        _train(args, start_date)
+        avg_inc_accs.append(_train(args, start_date))
         print("Training finished in {}s.".format(int(time.time() - start_time)))
+
+    return avg_inc_accs
 
 
 def _train(args, start_date):
@@ -73,18 +78,18 @@ def _train(args, start_date):
         memory = model.get_memory()
         memory_val = model.get_val_memory()
 
-    print(
-        "Average Incremental Accuracy: {}.".format(
-            results_utils.compute_avg_inc_acc(results["results"])
-        )
-    )
+    results["average_incremental_accuracy"] = results_utils.compute_avg_inc_acc(results["results"])
+
+    print("Average Incremental Accuracy: {}.".format(results["average_incremental_accuracy"]))
 
     if args["name"] is not None:
         results_utils.save_results(results, args["name"], args["model"], start_date)
 
     del model
     del inc_dataset
-    torch.cuda.empty_cache()
+    #torch.cuda.empty_cache()
+
+    return results["average_incremental_accuracy"]
 
 
 def _set_seed(seed):
@@ -103,7 +108,14 @@ def _set_up_options(args):
         if not os.path.exists(option_path):
             raise IOError("Not found options file {}.".format(option_path))
 
-        with open(option_path) as f:
-            options = yaml.load(f, Loader=yaml.FullLoader)
+        args.update(_parse_options(option_path))
 
-        args.update(options)
+
+def _parse_options(path):
+    with open(path) as f:
+        if path.endswith(".yaml") or path.endswith(".yml"):
+            return yaml.load(f, Loader=yaml.FullLoader)
+        elif path.endswith(".json"):
+            return json.load(f)["config"]
+        else:
+            raise Exception("Unknown file type {}.".format(path))
