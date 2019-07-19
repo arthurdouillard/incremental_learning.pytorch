@@ -1,6 +1,9 @@
 model: ucir
 convnet: rebuffi
 
+initial_increment: 50
+fixed_memory: True
+
 lr: 0.1
 weight_decay: 0.00005
 scheduling:
