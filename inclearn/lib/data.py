@@ -40,7 +40,9 @@ class IncrementalDataset:
         increment=10,
         validation_split=0.,
         onehot=False,
-        initial_increment=None
+        initial_increment=None,
+        sampler=None,
+        data_path="data"
     ):
         datasets = _get_datasets(dataset_name)
         self._setup_data(
@@ -49,7 +51,8 @@ class IncrementalDataset:
             seed=seed,
             increment=increment,
             validation_split=validation_split,
-            initial_increment=initial_increment
+            initial_increment=initial_increment,
+            data_path=data_path
         )
         self.train_transforms = datasets[0].train_transforms  # FIXME handle multiple datasets
         self.common_transforms = datasets[0].common_transforms
@@ -60,6 +63,7 @@ class IncrementalDataset:
         self._workers = workers
         self._shuffle = shuffle
         self._onehot = onehot
+        self._sampler = sampler
 
     @property
     def n_tasks(self):
@@ -200,11 +204,19 @@ class IncrementalDataset:
         else:
             raise NotImplementedError("Unknown mode {}.".format(mode))
 
+        if self._sampler is not None and mode == "train":
+            sampler = self._sampler(y)
+            batch_size = 1
+        else:
+            sampler = None
+            batch_size = self._batch_size
+
         return DataLoader(
             DummyDataset(x, y, memory_flags, trsf),
-            batch_size=self._batch_size,
-            shuffle=shuffle,
+            batch_size=batch_size,
+            shuffle=shuffle if sampler is None else False,
             num_workers=self._workers,
+            batch_sampler=sampler
         )
 
     def _setup_data(
@@ -214,7 +226,8 @@ class IncrementalDataset:
         seed=1,
         increment=10,
         validation_split=0.,
-        initial_increment=None
+        initial_increment=None,
+        data_path="data"
     ):
         # FIXME: handles online loading of images
         self.data_train, self.targets_train = [], []
@@ -225,8 +238,8 @@ class IncrementalDataset:
 
         current_class_idx = 0  # When using multiple datasets
         for dataset in datasets:
-            train_dataset = dataset.base_dataset("data", train=True, download=True)
-            test_dataset = dataset.base_dataset("data", train=False, download=True)
+            train_dataset = dataset.base_dataset(data_path, train=True, download=True)
+            test_dataset = dataset.base_dataset(data_path, train=False, download=True)
 
             x_train, y_train = train_dataset.data, np.array(train_dataset.targets)
             x_val, y_val, x_train, y_train = self._split_per_class(

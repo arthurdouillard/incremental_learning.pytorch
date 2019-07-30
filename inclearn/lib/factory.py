@@ -3,7 +3,7 @@ from torch import optim
 
 from inclearn import models
 from inclearn.convnet import densenet, my_resnet, resnet, ucir_resnet
-from inclearn.lib import data
+from inclearn.lib import data, samplers
 
 
 def get_optimizer(params, optimizer, lr, weight_decay=0.0):
@@ -51,6 +51,10 @@ def get_model(args):
         return models.ICarlMixUp(args)
     elif args["model"] == "ucir":
         return models.UCIR(args)
+    elif args["model"] == "test":
+        return models.Test(args)
+    elif args["model"] == "ucir_test":
+        return models.UCIRTest(args)
 
     raise NotImplementedError("Unknown model {}.".format(args["model"]))
 
@@ -65,7 +69,9 @@ def get_data(args):
         validation_split=args["validation"],
         onehot=args["onehot"],
         increment=args["increment"],
-        initial_increment=args["initial_increment"]
+        initial_increment=args["initial_increment"],
+        sampler=get_sampler(args),
+        data_path=args["data_path"]
     )
 
 
@@ -78,3 +84,15 @@ def set_device(args):
         device = torch.device("cuda:{}".format(device_type))
 
     args["device"] = device
+
+
+def get_sampler(args):
+    if args["sampler"] is None:
+        return None
+
+    sampler_type = args["sampler"].lower().strip()
+
+    if sampler_type == "npair":
+        return samplers.NPairSampler
+
+    raise ValueError("Unknown sampler {}.".format(sampler_type))
