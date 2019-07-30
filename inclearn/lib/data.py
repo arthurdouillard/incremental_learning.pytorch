@@ -109,7 +109,7 @@ class IncrementalDataset:
 
         task_info = {
             "min_class": min_class,
-            "max_class": max_class,
+            "max_class": sum(self.increments),
             "increment": self.increments[self._current_task],
             "task": self._current_task,
             "max_task": len(self.increments),
