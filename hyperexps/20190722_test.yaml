@@ -1,0 +1,25 @@
+model: test
+increment: 10
+dataset: cifar100
+sampler: npair
+lr_decay: 0.1
+data_path: "/srv/data/adouillard/inclearn_data/"
+
+var:distillation_loss:
+  - True
+  - False
+var:lr:
+  - 0.1
+  - 0.01
+  - 0.001
+var:epochs:
+  - 40
+  - 60
+  - 80
+var:scheduling:
+  - [20, 40, 50]
+  - [30, 50, 70]
+  - [10, 20, 30]
+var:lambda_schedule:
+  - True
+  - False

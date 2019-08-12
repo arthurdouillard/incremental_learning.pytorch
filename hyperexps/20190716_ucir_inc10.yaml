@@ -1,0 +1,34 @@
+model: ucir
+convnet: rebuffi
+
+increment: 10
+fixed_memory: False
+
+scaling_factor: True
+lambda_schedule: True
+distillation_loss: True
+var:ranking_loss:
+  - True
+  - False
+
+base_lambda: 5
+nb_negatives: 2
+margin_ranking: 0.2
+var:imprinted_weights:
+ - True
+ - False
+
+lr: 0.1
+weight_decay: 0.0005
+var:scheduling:
+  -
+    - 80
+    - 120
+  -
+    - 40
+    - 80
+lr_decay: 0.1
+optimizer: sgd
+var:epochs:
+  - 100
+  - 160

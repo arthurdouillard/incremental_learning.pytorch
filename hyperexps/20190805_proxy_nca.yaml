@@ -1,0 +1,58 @@
+model: ucir_test
+convnet: rebuffi
+data_path: "/srv/data/adouillard/inclearn_data/"
+
+initial_increment: 50
+increment: 10
+fixed_memory: True
+
+adaptative_margin_softmax: False
+
+var:eval_type:
+  - nme
+  - cnn
+
+scaling_factor: True
+lambda_schedule: True
+var:less_forget:
+  - False
+  - True
+ranking_loss:
+  - False
+  - True
+
+mimic_score: False
+
+proxy_nca: True
+var:proxy_per_class:
+  - 1
+  - 2
+
+relative_teachers: False
+relative_teacher_on_memory: False
+
+attention_residual: False
+
+base_lambda: 5
+nb_negatives: 2
+margin_ranking: 0.5
+imprinted_weights: True
+
+
+lr: 0.1
+weight_decay: 0.0005
+var:scheduling:
+  -
+    - 80
+    - 120
+    - 150
+  -
+    - 20
+    - 40
+    - 60
+lr_decay: 0.1
+optimizer: sgd
+var:epochs:
+  - 160
+  - 60
+  - 100

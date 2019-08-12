@@ -1,0 +1,9 @@
+model: icarl
+increment: 10
+dataset: cifar100
+epochs:
+  - 70
+  - 90
+var:scheduling:
+  - [49, 63]
+  - [20, 45, 60]
