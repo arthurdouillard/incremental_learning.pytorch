@@ -1,3 +1,4 @@
+import collections
 import pdb
 
 import numpy as np
@@ -41,6 +42,7 @@ class ICarl(IncrementalLearner):
 
         self._network = network.BasicNet(
             args["convnet"],
+            convnet_kwargs=args.get("convnet_config", {}),
             device=self._device,
             use_bias=True,
             extract_no_act=True,
@@ -84,7 +86,7 @@ class ICarl(IncrementalLearner):
         print("nb ", len(train_loader.dataset))
 
         for epoch in range(self._n_epochs):
-            _loss, val_loss = 0., 0.
+            self._metrics = collections.defaultdict(float)
 
             self._scheduler.step()
 
@@ -97,18 +99,24 @@ class ICarl(IncrementalLearner):
 
                 self._optimizer.step()
 
-                _loss += loss.item()
+                #if val_loader is not None and i == len(train_loader):
+                #    for inputs, targets, memory_flags in val_loader:
+                #        val_loss += self._forward_loss(inputs, targets, memory_flags).item()
 
-                if val_loader is not None and i == len(train_loader):
-                    for inputs, targets, memory_flags in val_loader:
-                        val_loss += self._forward_loss(inputs, targets, memory_flags).item()
+                self._print_metrics(prog_bar, epoch, i)
 
-                prog_bar.set_description(
-                    "Task {}/{}, Epoch {}/{} => Clf loss: {}, Val loss: {}".format(
-                        self._task + 1, self._n_tasks, epoch + 1, self._n_epochs,
-                        round(_loss / i, 3), round(val_loss, 3)
-                    )
-                )
+    def _print_metrics(self, prog_bar, epoch, nb_batches):
+        pretty_metrics = ", ".join(
+            "{}: {}".format(metric_name, round(metric_value / nb_batches, 3))
+            for metric_name, metric_value in self._metrics.items()
+        )
+
+        prog_bar.set_description(
+            "T{}/{}, E{}/{} => {}".format(
+                self._task + 1, self._n_tasks, epoch + 1, self._n_epochs,
+                pretty_metrics
+            )
+        )
 
     def _forward_loss(self, inputs, targets, memory_flags):
         inputs, targets = inputs.to(self._device), targets.to(self._device)
@@ -120,12 +128,16 @@ class ICarl(IncrementalLearner):
         if not utils._check_loss(loss):
             pdb.set_trace()
 
+        self._metrics["loss"] += loss.item()
+
         return loss
 
     def _after_task(self, inc_dataset):
         self.build_examplars(inc_dataset)
 
         self._old_model = self._network.copy().freeze()
+
+        self._network.on_task_end()
 
     def _eval_task(self, data_loader):
         ypred, ytrue = self.compute_accuracy(self._network, data_loader, self._class_means)

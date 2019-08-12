@@ -1,9 +1,11 @@
 import math
+import warnings
 
+import numpy as np
 import torch
 from torch.nn import functional as F
 
-from inclearn.lib import factory, network
+from inclearn.lib import factory, losses, network
 from inclearn.models.icarl import ICarl
 
 
@@ -27,19 +29,28 @@ class UCIR(ICarl):
         self._fixed_memory = args["fixed_memory"]
         self._n_classes = 0
 
-        self._use_distil = args.get("distillation_loss", True)
+        if "distillation_loss" in args:
+            warnings.warn("distillation_loss is replaced by less_forget")
+            args["less_forget"] = args["distillation_loss"]
+            del args["distillation_loss"]
+
+        self._use_mimic_score = args.get("mimic_score", False)
+        self._use_less_forget = args.get("less_forget", True)
         self._lambda_schedule = args.get("lambda_schedule", True)
         self._use_ranking = args.get("ranking_loss", True)
         self._scaling_factor = args.get("scaling_factor", True)
+        self._scaling_initial_value = args.get("scaling_initial_value", 1.)
 
         self._network = network.BasicNet(
             args["convnet"],
+            convnet_kwargs=args.get("convnet_config", {}),
+            classifier_kwargs=args.get("classifier_config", {}),
+            postprocessor_kwargs=args.get("postprocessor_config", {}),
             device=self._device,
-            cosine_similarity=True,
-            scaling_factor=self._scaling_factor,
+            classifier_type="cosine",
             return_features=True,
             extract_no_act=True,
-            classifier_no_act=True
+            classifier_no_act=True,
         )
 
         self._examplars = {}
@@ -47,21 +58,59 @@ class UCIR(ICarl):
 
         self._old_model = None
 
-        self._clf_loss = F.binary_cross_entropy_with_logits
-        self._distil_loss = F.binary_cross_entropy_with_logits
-
         self._lambda = args.get("base_lambda", 5)
         self._nb_negatives = args.get("nb_negatives", 2)
         self._margin = args.get("ranking_margin", 0.2)
         self._use_imprinted_weights = args.get("imprinted_weights", True)
-
         self._herding_indexes = []
+
+        self._eval_type = args.get("eval_type", "nme")
+
+        self._args = args
+        self._args["_logs"] = {}
+
+    def _after_task(self, inc_dataset):
+        if "scale" not in self._args["_logs"]:
+            self._args["_logs"]["scale"] = []
+
+        if self._network.post_processor is None:
+            s = None
+        elif hasattr(self._network.post_processor, "scale"):
+            s = self._network.post_processor.scale.item()
+        elif hasattr(self._network.post_processor, "factor"):
+            s = self._network.post_processor.factor
+
+        print("Scale is {}.".format(s))
+        self._args["_logs"]["scale"].append(s)
+
+        super()._after_task(inc_dataset)
+
+    def _eval_task(self, data_loader):
+        if self._eval_type == "nme":
+            return super()._eval_task(data_loader)
+        elif self._eval_type == "cnn":
+            ypred = []
+            ytrue = []
+
+            for inputs, targets, _ in data_loader:
+                ytrue.append(targets.numpy())
+
+                inputs = inputs.to(self._device)
+                preds = F.softmax(self._network(inputs)[1], dim=1).argmax(dim=1)
+                ypred.append(preds.cpu().numpy())
+
+            ypred = np.concatenate(ypred)
+            ytrue = np.concatenate(ytrue)
+
+            return ypred, ytrue
+        else:
+            raise ValueError(self._eval_type)
 
     def _before_task(self, train_loader, val_loader):
         if self._use_imprinted_weights:
             self._network.add_imprinted_classes(
-                list(range(self._n_classes, self._n_classes + self._task_size)),
-                self.inc_dataset)
+                list(range(self._n_classes, self._n_classes + self._task_size)), self.inc_dataset
+            )
         else:
             self._network.add_classes(self._task_size)
         self._n_classes += self._task_size
@@ -85,56 +134,43 @@ class UCIR(ICarl):
         features, logits = features_logits
 
         # Classification loss is cosine + learned factor + softmax:
-        clf_loss = F.cross_entropy(self._network.post_process(logits), targets)
+        loss = F.cross_entropy(self._network.post_process(logits), targets)
+        self._metrics["clf"] += loss.item()
 
         if self._old_model is not None:
             with torch.no_grad():
                 old_features, old_logits = self._old_model(inputs)
 
-            # Distillation loss fixing the deviation problem:
-            if self._lambda_schedule:
-                scheduled_lambda = self._lambda * math.sqrt(
-                    self._n_classes / self._task_size
+            if self._use_less_forget:
+                if self._lambda_schedule:
+                    scheduled_lambda = self._lambda * math.sqrt(self._n_classes / self._task_size)
+                else:
+                    scheduled_lambda = 1.
+
+                lessforget_loss = scheduled_lambda * losses.embeddings_similarity(
+                    old_features, features
                 )
-            else:
-                scheduled_lambda = 1.
+                loss += lessforget_loss
+                self._metrics["lessforget"] += lessforget_loss.item()
+            elif self._use_mimic_score:
+                old_class_logits = logits[..., :self._n_classes - self._task_size]
+                old_class_old_logits = old_logits[..., :self._n_classes - self._task_size]
 
-            distil_loss = scheduled_lambda * F.cosine_embedding_loss(
-                features, old_features,
-                torch.ones(inputs.shape[0]).to(self._device)
-            )
+                mimic_loss = F.mse_loss(old_class_logits, old_class_old_logits)
+                mimic_loss *= (self._n_classes - self._task_size)
+                loss += mimic_loss
+                self._metrics["mimic"] += mimic_loss.item()
 
-            # Ranking loss maximizing the inter-class separation between old & new:
-
-            # 1. Fetching from the batch only samples from the batch that belongs
-            #    to old classes:
-            old_indexes = targets.lt(self._n_classes - 1)
-            old_logits = logits[old_indexes]
-            old_targets = targets[old_indexes]
-
-            # 2. Getting positive values, aka ground-truth's logit predictions:
-            old_values = old_logits[torch.arange(len(old_logits)), old_targets]
-            old_values = old_values.repeat(self._nb_negatives, 1).t().contiguous().view(-1)
-
-            # 3. Getting top-k negative values:
-            nb_old_classes = self._n_classes - self._task_size
-            negative_indexes = old_logits[..., nb_old_classes:].argsort(dim=1, descending=True)[..., :self._nb_negatives] + nb_old_classes
-            new_values = old_logits[torch.arange(len(old_logits)).view(-1, 1), negative_indexes].view(-1)
-
-            ranking_loss = F.margin_ranking_loss(
-                old_values,
-                new_values,
-                -torch.ones(len(old_values)).to(self._device),
-                margin=self._margin
-            )
-        else:
-            distil_loss = torch.tensor(0.)
-            ranking_loss = torch.tensor(0.)
-
-        loss = clf_loss
-        if self._use_distil:
-            loss += distil_loss
-        if self._use_ranking:
-            loss += ranking_loss
+            if self._use_ranking:
+                ranking_loss = losses.ucir_ranking(
+                    logits,
+                    targets,
+                    self._n_classes,
+                    self._task_size,
+                    nb_negatives=self._nb_negatives,
+                    margin=self._margin
+                )
+                loss += ranking_loss
+                self._metrics["rank"] += ranking_loss.item()
 
         return loss

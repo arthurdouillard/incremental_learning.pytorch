@@ -48,3 +48,20 @@ def extract_features(model, loader):
         targets.append(_targets)
 
     return np.concatenate(features), np.concatenate(targets)
+
+
+def classify(model, loader):
+    targets, predictions = [], []
+
+    for _inputs, _targets, _ in loader:
+        _targets = _targets.numpy()
+        outputs = model(_inputs.to(model.device))
+        if not isinstance(outputs, list):
+            outputs = [outputs]
+
+        preds = outputs[-1].argmax(dim=1).detach().cpu().numpy()
+
+        predictions.append(preds)
+        targets.append(_targets)
+
+    return np.concatenate(predictions), np.concatenate(targets)

@@ -122,7 +122,7 @@ def main():
             config=get_tune_config(args.tune),
             resources_per_trial={
                 "cpu": 2,
-                "gpu": 1
+                "gpu": 0.5
             },
             local_dir="./ray_results"
         )

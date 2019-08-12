@@ -1,5 +1,4 @@
 import copy
-import math
 
 import torch
 from torch import nn
@@ -14,34 +13,42 @@ class BasicNet(nn.Module):
         self,
         convnet_type,
         convnet_kwargs={},
-        use_bias=False,
+        classifier_kwargs={},
+        postprocessor_kwargs={},
         init="kaiming",
-        use_multi_fc=False,
-        cosine_similarity=False,
-        scaling_factor=False,
+        classifier_type="fc",
         device=None,
         return_features=False,
         extract_no_act=False,
-        classifier_no_act=False
+        classifier_no_act=False,
+        attention_hook=False
     ):
         super(BasicNet, self).__init__()
 
-        if scaling_factor:
-            self.post_processor = LearnedScaler()
+        if postprocessor_kwargs["type"] == "learned_scaling":
+            self.post_processor = FactorScalar(**postprocessor_kwargs)
+        elif postprocessor_kwargs["type"] == "heatedup":
+            self.post_processor = HeatedUpScalar(**postprocessor_kwargs)
         else:
             self.post_processor = None
 
         self.convnet = factory.get_convnet(convnet_type, **convnet_kwargs)
 
-        self.cosine_similarity = cosine_similarity
-        if cosine_similarity:
-            self.classifier = CosineClassifier(self.convnet.out_dim, device)
+        if classifier_type == "fc":
+            self.classifier = Classifier(self.convnet.out_dim, device=device, **classifier_kwargs)
+        elif classifier_type == "cosine":
+            self.classifier = CosineClassifier(
+                self.convnet.out_dim, device=device, **classifier_kwargs
+            )
+        elif classifier_type is None or classifier_type == "none":
+            self.classifier = lambda x: x
         else:
-            self.classifier = Classifier(self.convnet.out_dim, use_bias, use_multi_fc, init, device)
+            raise ValueError("Unknown classifier type {}.".format(classifier_type))
 
         self.return_features = return_features
         self.extract_no_act = extract_no_act
         self.classifier_no_act = classifier_no_act
+        self.attention_hook = attention_hook
         self.device = device
 
         if self.extract_no_act:
@@ -51,14 +58,28 @@ class BasicNet(nn.Module):
 
         self.to(self.device)
 
+    def on_task_end(self):
+        if isinstance(self.classifier, nn.Module):
+            self.classifier.on_task_end()
+        if isinstance(self.post_processor, nn.Module):
+            self.post_processor.on_task_end()
+
     def forward(self, x):
-        raw_features, features = self.convnet(x)
-        logits = self.classifier(raw_features if self.classifier_no_act else features)
+        outputs = self.convnet(x, attention_hook=self.attention_hook)
+        logits = self.classifier(outputs[0] if self.classifier_no_act else outputs[1])
 
         if self.return_features:
+            to_return = []
             if self.extract_no_act:
-                return raw_features, logits
-            return features, logits
+                to_return.append(outputs[0])
+            else:
+                to_return.append(outputs[1])
+
+            to_return.append(logits)
+            if self.attention_hook:
+                to_return.append(outputs[2])
+
+            return to_return
         return logits
 
     def post_process(self, x):
@@ -98,7 +119,8 @@ class BasicNet(nn.Module):
 
 
 class Classifier(nn.Module):
-    def __init__(self, features_dim, use_bias, use_multi_fc, init, device):
+
+    def __init__(self, features_dim, *, use_bias, use_multi_fc, init, device, **kwargs):
         super().__init__()
 
         self.features_dim = features_dim
@@ -110,6 +132,9 @@ class Classifier(nn.Module):
         self.n_classes = 0
 
         self.classifier = None
+
+    def on_task_end(self):
+        pass
 
     def forward(self, features):
         if self.classifier is None:
@@ -167,37 +192,54 @@ class Classifier(nn.Module):
 
 
 class CosineClassifier(nn.Module):
-    def __init__(self, features_dim, device):
+
+    def __init__(self, features_dim, device, *, use_bias=False, proxy_per_class=1, **kwargs):
         super().__init__()
 
         self.n_classes = 0
         self.weights = None
+        self.bias = None
+        self.use_bias = use_bias
         self.features_dim = features_dim
-
+        self.proxy_per_class = proxy_per_class
         self.device = device
 
+    def on_task_end(self):
+        pass
+
     def forward(self, features):
-        #features_normalized = F.normalize(features, p=2, dim=1)
-        #weights_normalized = F.normalize(self.weights, p=2, dim=1)
-#
-        #return F.linear(features_normalized, weights_normalized)
         features_norm = features / (features.norm(dim=1)[:, None] + 1e-8)
         weights_norm = self.weights / (self.weights.norm(dim=1)[:, None] + 1e-8)
         similarities = torch.mm(features_norm, weights_norm.transpose(0, 1))
+
+        if self.use_bias:
+            similarities = similarities + self.bias
+
         return similarities
 
     def add_classes(self, n_classes):
-        new_weights = nn.Parameter(torch.zeros(self.n_classes + n_classes, self.features_dim))
-
-        #stdv = 1. / math.sqrt(self.features_dim)
-        #new_weights.data.uniform_(-stdv, stdv)
+        new_weights = nn.Parameter(
+            torch.zeros(self.n_classes + self.proxy_per_class * n_classes, self.features_dim)
+        )
         nn.init.kaiming_normal_(new_weights, nonlinearity="linear")
 
         if self.weights is not None:
-            new_weights.data[:self.n_classes] = copy.deepcopy(self.weights.data)
+            new_weights.data[:self.n_classes *
+                             self.proxy_per_class] = copy.deepcopy(self.weights.data)
 
         del self.weights
         self.weights = new_weights
+
+        if self.use_bias:
+            new_bias = nn.Parameter(torch.zeros(self.n_classes + self.proxy_per_class * n_classes))
+            nn.init.constant_(new_bias, 0.1)
+            if self.bias is not None:
+                new_bias.data[:self.n_classes *
+                              self.proxy_per_class] = copy.deepcopy(self.bias.data)
+
+            del self.bias
+            self.bias = new_bias
+
         self.to(self.device)
         self.n_classes += n_classes
 
@@ -220,28 +262,67 @@ class CosineClassifier(nn.Module):
 
             features_normalized = F.normalize(torch.from_numpy(features), p=2, dim=1)
             class_embeddings = torch.mean(features_normalized, dim=0)
-            new_weights.append(
-                F.normalize(class_embeddings, p=2, dim=0) * avg_weights_norm
-            )
+
+            imprinted_weights = F.normalize(class_embeddings, p=2, dim=0) * avg_weights_norm
+
+            for _ in range(self.proxy_per_class):
+                # TODO could lead to bad performance if proxy_per_class > 1.
+                # TODO add noise to differentiate them
+                new_weights.append(imprinted_weights)
 
         new_weights = torch.stack(new_weights)
         self.weights.data[-len(class_indexes):] = new_weights.to(self.device)
+
         return self
 
 
-class LearnedScaler(nn.Module):
-    def __init__(self, initial_value=1.):
+class FactorScalar(nn.Module):
+
+    def __init__(self, initial_value=1., **kwargs):
         super().__init__()
 
         self.scale = nn.Parameter(torch.tensor(initial_value))
+
+    def on_task_end(self):
+        pass
 
     def forward(self, inputs):
         return self.scale * inputs
 
 
+class HeatedUpScalar(nn.Module):
+    def __init__(self, first_value, last_value, nb_steps, **kwargs):
+        super().__init__()
+
+        self.first_value = first_value
+        self.step = (max(first_value, last_value) - min(first_value, last_value)) / nb_steps
+
+        if first_value > last_value:
+            self._factor = -1
+        else:
+            self._factor = 1
+
+        self._increment = 0
+
+        print("Heated-up factor is {}.".format(self.factor))
+
+    def on_task_end(self):
+        self._increment += 1
+        print("Heated-up factor is {}.".format(self.factor))
+
+    @property
+    def factor(self):
+        return self.first_value + (self._factor * self._increment * self.step)
+
+    def forward(self, inputs):
+        return self.factor * inputs
+
+
+
 # -------------
 # Recalibration
 # -------------
+
 
 class CalibrationWrapper(nn.Module):
     """Wraps several calibration models, each being applied on different targets."""

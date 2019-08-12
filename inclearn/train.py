@@ -54,7 +54,7 @@ def _train(args, start_date):
 
         model.set_task_info(
             task=task_info["task"],
-            total_n_classes=task_info["max_class"],
+            total_n_classes=task_info["total_n_classes"],
             increment=task_info["increment"],
             n_train_data=task_info["n_train_data"],
             n_test_data=task_info["n_test_data"],

@@ -1,3 +1,11 @@
 https://download.pytorch.org/whl/cu80/torch-1.0.1.post2-cp35-cp35m-linux_x86_64.whl
-torchvision
+torchvision==0.2.2
 numpy
+PyYaml
+scikit-learn
+matplotlib
+ray
+jupyter
+pandas
+requests
+psutils

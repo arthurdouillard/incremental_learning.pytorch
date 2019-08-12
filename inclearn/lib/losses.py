@@ -4,8 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memory_indexes,
-                                     lambda_factor=1.):
+def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memory_indexes):
     memory_indexes = memory_indexes.byte()
 
     per_sample_losses = F.cross_entropy(similarities, targets, reduction="none")
@@ -20,7 +19,7 @@ def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memo
                                                               shape[0]), memory_targets]
     hard_indexes = right_old_confidence.le(0.5)
 
-    factors = lambda_factor * (1 + (1 - right_old_confidence[hard_indexes]))
+    factors = 2 * (1 + (1 - right_old_confidence[hard_indexes]))
 
     loss = torch.mean(
         torch.cat(
@@ -148,13 +147,13 @@ def residual_attention_distillation(list_attentions_a, list_attentions_b, use_de
         a = F.normalize(a, dim=1, p=2)
         b = F.normalize(b, dim=1, p=2)
 
-        layer_loss = torch.frobenius_norm(a - b)
-        #layer_loss = (1 - torch.mm(a, b.t())).sum()
+        #layer_loss = torch.frobenius_norm(a - b)
+        layer_loss = (1 - torch.mm(a, b.t())).sum()
         if use_depth_weights:
             layer_loss = depth_weights[i] * layer_loss
         loss += layer_loss
 
-    loss = 5 * loss
+    loss = loss
 
     if use_depth_weights:
         return loss
@@ -182,6 +181,49 @@ def relative_teacher_distances(features_a, features_b, normalize_features=False)
     pairwise_distances_b = torch.pdist(features_b, p=2)
 
     return torch.mean(torch.abs(pairwise_distances_a - pairwise_distances_b))
+
+
+def global_orthogonal_regularization(features, targets, normalize=False):
+    """Global Orthogonal Regularization (GOR) forces features of different
+    classes to be orthogonal.
+
+    # Reference:
+        * Learning Spread-out Local Feature Descriptors.
+          Zhang et al.
+          ICCV 2016.
+
+    :param features: A flattened extracted features.
+    :param targets: Sparse targets.
+    :return: A float scalar loss.
+    """
+    if normalize:
+        features = F.normalize(features, dim=1, p=2)
+
+    positive_indexes, negative_indexes = [], []
+
+    targets = targets.cpu().numpy()
+    for target in set(targets):
+        positive_index = np.random.choice(np.where(targets == target)[0], 1)
+        negative_index = np.random.choice(np.where(targets != target)[0], 1)
+
+        positive_indexes.append(positive_index)
+        negative_indexes.append(negative_index)
+
+    positive_indexes = torch.LongTensor(positive_indexes)
+    negative_indexes = torch.LongTensor(negative_indexes)
+
+    positive_features = features[positive_indexes]
+    negative_features = features[negative_indexes]
+
+    similarities = torch.sum(torch.mul(positive_features, negative_features), 1)
+    features_dim = features.shape[1]
+
+    first_moment = torch.mean(similarities)
+    second_moment = torch.mean(torch.pow(similarities, 2))
+
+    loss = torch.pow(first_moment, 2) + torch.clamp(second_moment - 1./features_dim, min=0.)
+
+    return loss
 
 
 def weights_orthogonality(weights, margin=0.):

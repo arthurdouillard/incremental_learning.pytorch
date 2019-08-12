@@ -42,6 +42,9 @@ def get_parser():
                         help="Return data in onehot format.")
     parser.add_argument("-initial-increment", "--initial-increment", default=None, type=int,
                         help="Initial increment, may be bigger.")
+    parser.add_argument("-sampler", "--sampler",
+                        help="Elements sampler.")
+    parser.add_argument("--data-path", default="data", type=str)
 
     # Training related:
     parser.add_argument("-lr", "--lr", default=2., type=float,
@@ -68,5 +71,9 @@ def get_parser():
                         help="Seed range going from first number to second (both included).")
     parser.add_argument("-options", "--options", nargs="+",
                         help="A list of options files.")
+    parser.add_argument("-save", "--save-model", choices=["last", "task"],
+                        default="last",
+                        help="Save the network, either the `last` one or"
+                             " each `task`'s ones.")
 
     return parser

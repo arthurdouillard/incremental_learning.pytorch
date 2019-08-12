@@ -109,7 +109,8 @@ class IncrementalDataset:
 
         task_info = {
             "min_class": min_class,
-            "max_class": sum(self.increments),
+            "max_class": max_class,
+            "total_n_classes": sum(self.increments),
             "increment": self.increments[self._current_task],
             "task": self._current_task,
             "max_task": len(self.increments),
@@ -376,6 +377,7 @@ class iCIFAR10(DataHandler):
     train_transforms = [
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
+        #transforms.RandomRotation(10),
         transforms.ColorJitter(brightness=63 / 255)
     ]
     common_transforms = [

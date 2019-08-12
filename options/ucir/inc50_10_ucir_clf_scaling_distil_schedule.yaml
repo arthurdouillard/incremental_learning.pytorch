@@ -5,9 +5,11 @@ initial_increment: 50
 fixed_memory: True
 
 scaling_factor: True
-distillation_loss: True
+less_forget: True
 lambda_schedule: True
 ranking_loss: False
+
+eval_type: nme
 
 base_lambda: 5
 nb_negatives: 2
