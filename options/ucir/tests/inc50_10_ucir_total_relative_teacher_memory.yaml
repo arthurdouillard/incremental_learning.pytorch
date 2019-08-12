@@ -1,0 +1,29 @@
+model: ucir_test
+convnet: rebuffi
+
+initial_increment: 50
+increment: 10
+fixed_memory: True
+
+scaling_factor: True
+lambda_schedule: True
+distillation_loss: True
+ranking_loss: False
+
+relative_teachers: True
+relative_teacher_on_memory: True
+
+base_lambda: 5
+nb_negatives: 2
+margin_ranking: 0.5
+imprinted_weights: True
+
+
+lr: 0.1
+weight_decay: 0.0005
+scheduling:
+  - 80
+  - 120
+lr_decay: 0.1
+optimizer: sgd
+epochs: 160

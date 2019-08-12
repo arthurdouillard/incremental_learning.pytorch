@@ -1,0 +1,40 @@
+model: ucir_test
+convnet: rebuffi
+
+initial_increment: 50
+increment: 10
+fixed_memory: True
+
+adaptative_margin_softmax: False
+
+eval_type: cnn
+
+scaling_factor: False
+lambda_schedule: False
+less_forget: False
+ranking_loss: False
+
+mimic_score: False
+
+proxy_nca: True
+proxy_nca_config:
+  proxy_per_class: 2
+
+relative_teachers: False
+relative_teacher_on_memory: False
+
+attention_residual: False
+
+base_lambda: 5
+nb_negatives: 2
+margin_ranking: 0.5
+imprinted_weights: True
+
+
+lr: 0.1
+weight_decay: 0.0005
+scheduling:
+  - 1000
+lr_decay: 0.1
+optimizer: sgd
+epochs: 30 #160
