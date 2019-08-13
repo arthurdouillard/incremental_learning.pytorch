@@ -4,14 +4,24 @@ convnet: rebuffi
 initial_increment: 50
 fixed_memory: True
 
-postprocessor_config:
-  type: learned_scaling
-  initial_value: 1.
-
-mimic_score: True
-less_forget: False
-lambda_schedule: False
+mimic_score: False
+less_forget: True
+lambda_schedule: True
 ranking_loss: False
+
+postprocessor_config:
+  type: heatedup
+  first_value: 16.
+  last_value: 4.
+  nb_steps: 6
+
+classifier_config:
+  type: cosine
+  bn_normalize: True
+  use_bias: True
+  freeze_bn: False
+
+eval_type: nme
 
 base_lambda: 5
 nb_negatives: 2

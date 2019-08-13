@@ -14,16 +14,17 @@ postprocessor_config:
   initial_value: 1.
 
 lambda_schedule: False
-less_forget: True
+less_forget: False
 ranking_loss: False
 
 mimic_score: False
 
 classifier_config:
   type: proxynca
-  pre_relu: False
-  use_scaling: True
+  pre_relu: True
+  use_scaling: False
   linear: False
+  linear_end_relu: False
 
 proxy_nca: True
 proxy_nca_config:
@@ -32,7 +33,7 @@ proxy_nca_config:
 relative_teachers: False
 relative_teacher_on_memory: False
 
-attention_residual: False
+attention_residual: True
 
 base_lambda: 5
 nb_negatives: 2
@@ -43,10 +44,8 @@ imprinted_weights: True
 lr: 0.1
 weight_decay: 0.0005
 scheduling:
-  #- 20
-  - 80
-  - 120
-  #- 150
+  - 49
+  - 63
 lr_decay: 0.1
 optimizer: sgd
-epochs: 160
+epochs: 70

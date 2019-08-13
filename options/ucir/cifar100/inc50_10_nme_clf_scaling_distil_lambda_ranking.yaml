@@ -8,10 +8,12 @@ postprocessor_config:
   type: learned_scaling
   initial_value: 1.
 
-mimic_score: True
-less_forget: False
-lambda_schedule: False
-ranking_loss: False
+mimic_score: False
+less_forget: True
+lambda_schedule: True
+ranking_loss: True
+
+eval_type: nme
 
 base_lambda: 5
 nb_negatives: 2

@@ -15,6 +15,12 @@ postprocessor_config:
   last_value: 4.
   nb_steps: 6
 
+classifier_config:
+  type: cosine
+  bn_normalize: False
+  use_bias: False
+  freeze_bn: False
+
 eval_type: nme
 
 base_lambda: 5

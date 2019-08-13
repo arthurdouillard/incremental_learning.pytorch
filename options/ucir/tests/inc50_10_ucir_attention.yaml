@@ -5,7 +5,10 @@ initial_increment: 50
 increment: 10
 fixed_memory: True
 
-scaling_factor: True
+postprocessor_config:
+  type: learned_scaling
+  initial_value: 1.
+
 lambda_schedule: False
 distillation_loss: False
 ranking_loss: False

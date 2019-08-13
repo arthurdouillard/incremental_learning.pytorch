@@ -6,7 +6,10 @@ batch_size: 512
 initial_increment: 50
 fixed_memory: True
 
-scaling_factor: True
+postprocessor_config:
+  type: learned_scaling
+  initial_value: 1.
+
 mimic_score: False
 less_forget: True
 lambda_schedule: True

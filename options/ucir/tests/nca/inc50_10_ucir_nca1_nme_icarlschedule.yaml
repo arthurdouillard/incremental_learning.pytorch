@@ -21,9 +21,10 @@ mimic_score: False
 
 classifier_config:
   type: proxynca
-  pre_relu: False
-  use_scaling: True
-  linear: False
+  pre_relu: True
+  use_scaling: False
+  linear: True
+  linear_end_relu: False
 
 proxy_nca: True
 proxy_nca_config:
@@ -43,10 +44,8 @@ imprinted_weights: True
 lr: 0.1
 weight_decay: 0.0005
 scheduling:
-  #- 20
-  - 80
-  - 120
-  #- 150
+  - 49
+  - 63
 lr_decay: 0.1
 optimizer: sgd
-epochs: 160
+epochs: 70
