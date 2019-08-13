@@ -38,8 +38,6 @@ class UCIR(ICarl):
         self._use_less_forget = args.get("less_forget", True)
         self._lambda_schedule = args.get("lambda_schedule", True)
         self._use_ranking = args.get("ranking_loss", True)
-        self._scaling_factor = args.get("scaling_factor", True)
-        self._scaling_initial_value = args.get("scaling_initial_value", 1.)
 
         self._network = network.BasicNet(
             args["convnet"],
@@ -47,7 +45,6 @@ class UCIR(ICarl):
             classifier_kwargs=args.get("classifier_config", {}),
             postprocessor_kwargs=args.get("postprocessor_config", {}),
             device=self._device,
-            classifier_type="cosine",
             return_features=True,
             extract_no_act=True,
             classifier_no_act=True,

@@ -43,8 +43,8 @@ class ICarl(IncrementalLearner):
         self._network = network.BasicNet(
             args["convnet"],
             convnet_kwargs=args.get("convnet_config", {}),
+            classifier_kwargs=args.get("classifier_config", {"type": "fc", "use_bias": True}),
             device=self._device,
-            use_bias=True,
             extract_no_act=True,
             classifier_no_act=False
         )
@@ -88,9 +88,7 @@ class ICarl(IncrementalLearner):
         for epoch in range(self._n_epochs):
             self._metrics = collections.defaultdict(float)
 
-            self._scheduler.step()
-
-            prog_bar = tqdm(train_loader)
+            prog_bar = tqdm(train_loader, ascii=True, bar_format="{l_bar}{r_bar}")
             for i, (inputs, targets, memory_flags) in enumerate(prog_bar, start=1):
                 self._optimizer.zero_grad()
 
@@ -99,11 +97,10 @@ class ICarl(IncrementalLearner):
 
                 self._optimizer.step()
 
-                #if val_loader is not None and i == len(train_loader):
-                #    for inputs, targets, memory_flags in val_loader:
-                #        val_loss += self._forward_loss(inputs, targets, memory_flags).item()
-
                 self._print_metrics(prog_bar, epoch, i)
+
+            self._scheduler.step()
+
 
     def _print_metrics(self, prog_bar, epoch, nb_batches):
         pretty_metrics = ", ".join(

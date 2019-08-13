@@ -71,7 +71,6 @@ class UCIRTest(ICarl):
             classifier_kwargs=classifier_kwargs,
             postprocessor_kwargs=args.get("postprocessor_config", {}),
             device=self._device,
-            classifier_type="cosine",
             return_features=True,
             extract_no_act=True,
             classifier_no_act=True,
@@ -136,14 +135,13 @@ class UCIRTest(ICarl):
 
                 inputs = inputs.to(self._device)
                 logits = self._network(inputs)[1]
-                if self._use_proxy_nca and self._proxy_nca_config["proxy_per_class"] > 1:
-                    preds = torch.zeros(inputs.shape[0], self._n_classes)
-                    for i in range(self._n_classes):
-                        j = i * self._proxy_nca_config["proxy_per_class"]
-                        preds[..., i] = logits[..., j:j+self._proxy_nca_config["proxy_per_class"]].sum(-1)
-                    preds = F.softmax(preds, dim=1).argmax(dim=1)
-                else:
-                    preds = F.softmax(logits, dim=1).argmax(dim=1)
+                if self._use_proxy_nca and self._proxy_per_class > 1:
+                    logits = logits.view(-1, self._n_classes, self._proxy_per_class).sum(-1)
+
+                if self._use_proxy_nca:
+                    logits = -logits  # Proxy-nca outputs distances
+
+                preds = logits.argmax(dim=1)
                 ypred.append(preds.cpu().numpy())
 
             ypred = np.concatenate(ypred)
@@ -243,15 +241,14 @@ class UCIRTest(ICarl):
             loss = losses.n_pair_loss(logits, targets)
             self._metrics["npair"] += loss.item()
         elif self._use_proxy_nca:
-            loss = losses.proxy_nca(logits, targets, self._n_classes,
-                                    self._proxy_per_class)
+            #loss = losses.proxy_nca(logits, targets, self._n_classes,
+            #                        self._proxy_per_class)
+            loss = losses.proxy_nca_github(logits, targets, self._n_classes)
             self._metrics["nca"] += loss.item()
         else:
             if self._use_teacher_confidence and self._old_model is not None:
                 loss = losses.cross_entropy_teacher_confidence(
-                    self._network.post_process(logits),
-                    targets,
-                    F.softmax(old_logits, dim=1),
+                    self._network.post_process(logits), targets, F.softmax(old_logits, dim=1),
                     memory_flags
                 )
                 self._metrics["clf_conf"] += loss.item()
@@ -317,9 +314,7 @@ class UCIRTest(ICarl):
                 self._metrics["rel"] += relative_t_loss.item()
 
             if self._use_attention_residual:
-                attention_loss = scheduled_lambda * losses.residual_attention_distillation(
-                    old_atts, atts
-                )
+                attention_loss = losses.residual_attention_distillation(old_atts, atts)
                 loss += attention_loss
                 self._metrics["att"] += attention_loss.item()
 
