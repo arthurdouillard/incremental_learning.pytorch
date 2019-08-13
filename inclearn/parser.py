@@ -44,7 +44,7 @@ def get_parser():
                         help="Initial increment, may be bigger.")
     parser.add_argument("-sampler", "--sampler",
                         help="Elements sampler.")
-    parser.add_argument("--data-path", default="data", type=str)
+    parser.add_argument("--data-path", default="/data/douillard/", type=str)
 
     # Training related:
     parser.add_argument("-lr", "--lr", default=2., type=float,
@@ -63,7 +63,7 @@ def get_parser():
     # Misc:
     parser.add_argument("--device", default=0, type=int,
                         help="GPU index to use, for cpu use -1.")
-    parser.add_argument("--name", type=str,
+    parser.add_argument("--label", type=str,
                         help="Experience name, if used a log will be created.")
     parser.add_argument("-seed", "--seed", default=[1], type=int, nargs="+",
                         help="Random seed.")

@@ -82,8 +82,9 @@ def _train(args, start_date):
 
     print("Average Incremental Accuracy: {}.".format(results["average_incremental_accuracy"]))
 
-    if args["name"] is not None:
-        results_utils.save_results(results, args["name"], args["model"], start_date)
+    print(args["label"])
+    if args["label"] is not None:
+        results_utils.save_results(results, args["label"], args["model"], start_date)
 
     del model
     del inc_dataset
