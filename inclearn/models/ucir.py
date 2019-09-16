@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from inclearn.lib import factory, losses, network
+from inclearn.lib import factory, losses, network, utils
 from inclearn.models.icarl import ICarl
 
 
@@ -16,6 +16,8 @@ class UCIR(ICarl):
     """
 
     def __init__(self, args):
+        self._disable_progressbar = args.get("no_progressbar", False)
+
         self._device = args["device"]
         self._opt_name = args["optimizer"]
         self._lr = args["lr"]
@@ -55,10 +57,16 @@ class UCIR(ICarl):
 
         self._old_model = None
 
+        self._warmup_config = args.get("warmup")
+        if self._warmup_config["total_epoch"] > 0:
+            self._lr /= self._warmup_config["multiplier"]
+
         self._lambda = args.get("base_lambda", 5)
         self._nb_negatives = args.get("nb_negatives", 2)
         self._margin = args.get("ranking_margin", 0.2)
-        self._use_imprinted_weights = args.get("imprinted_weights", True)
+
+        self._weight_generation = args.get("weight_generation")
+
         self._herding_indexes = []
 
         self._eval_type = args.get("eval_type", "nme")
@@ -103,13 +111,17 @@ class UCIR(ICarl):
         else:
             raise ValueError(self._eval_type)
 
+    def _gen_weights(self):
+        utils.add_new_weights(
+            self._network,
+            self._weight_generation if self._task == 0 else "basic",
+            self._n_classes, self._task_size,
+            self.inc_dataset
+        )
+
     def _before_task(self, train_loader, val_loader):
-        if self._use_imprinted_weights:
-            self._network.add_imprinted_classes(
-                list(range(self._n_classes, self._n_classes + self._task_size)), self.inc_dataset
-            )
-        else:
-            self._network.add_classes(self._task_size)
+        self._gen_weights()
+
         self._n_classes += self._task_size
         print("Now {} examplars per class.".format(self._memory_per_class))
 
@@ -117,9 +129,22 @@ class UCIR(ICarl):
             self._network.parameters(), self._opt_name, self._lr, self._weight_decay
         )
 
-        self._scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        base_scheduler = torch.optim.lr_scheduler.MultiStepLR(
             self._optimizer, self._scheduling, gamma=self._lr_decay
         )
+
+        if self._warmup_config:
+            if self._warmup_config.get("only_first_step", True) and self._task != 0:
+                pass
+            else:
+                print("Using WarmUp")
+                self._scheduler = schedulers.GradualWarmupScheduler(
+                    optimizer=self._optimizer,
+                    after_scheduler=base_scheduler,
+                    **self._warmup_config
+                )
+        else:
+            self._scheduler = base_scheduler
 
     def _train_task(self, *args, **kwargs):
         for p in self._network.parameters():

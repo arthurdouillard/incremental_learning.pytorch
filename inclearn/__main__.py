@@ -1,3 +1,5 @@
+import matplotlib; matplotlib.use('Agg')
+
 from inclearn import parser
 from inclearn.train import train
 

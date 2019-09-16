@@ -2,8 +2,29 @@ import numpy as np
 from torch.utils.data.sampler import BatchSampler
 
 
+class MemoryOverSampler(BatchSampler):
+    def __init__(self, y, memory_flags, oversample_factor=2, **kwargs):
+        pass
+
+
+class MultiSampler(BatchSampler):
+    """Sample same batch several times. Every time it's a little bit different
+    due to data augmentation. To be used with ensembling models."""
+    def __init__(self, nb_samples, batch_size, factor=1, **kwargs):
+        self.nb_samples = nb_samples
+        self.factor = factor
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return len(self.y) / self.batch_size
+
+    def __iter__(self):
+        pass
+
+
+
 class NPairSampler(BatchSampler):
-    def __init__(self, y, n_classes=10, n_samples=2):
+    def __init__(self, y, n_classes=10, n_samples=2, **kwargs):
         self.y = y
         self.n_classes = n_classes
         self.n_samples = n_samples

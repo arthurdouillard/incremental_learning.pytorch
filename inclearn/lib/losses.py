@@ -4,6 +4,73 @@ from torch import nn
 from torch.nn import functional as F
 
 
+def binarize_and_smooth_labels(T, nb_classes, smoothing_const = 0.1):
+    import sklearn.preprocessing
+    T = T.cpu().numpy()
+    T = sklearn.preprocessing.label_binarize(
+        T, classes = range(0, nb_classes)
+    )
+    T = T * (1 - smoothing_const)
+    T[T == 0] = smoothing_const / (nb_classes - 1)
+    T = torch.FloatTensor(T)
+    return T
+
+
+def proxy_nca_github(D, targets, nb_classes):
+    #return proxy_nca(-D, targets, nb_classes, 1)
+
+    T = binarize_and_smooth_labels(
+        T=targets, nb_classes=nb_classes, smoothing_const=0.
+    ).to(targets.device)
+
+    # cross entropy with distances as logits, one hot labels
+    # note that compared to proxy nca, positive not excluded in denominator
+    loss = torch.sum(- T * F.log_softmax(D, -1), -1)
+
+    return loss.mean()
+
+
+def proxy_nca(similarities, targets, nb_classes, proxy_per_class):
+    """NCA with proxies.
+
+    Reference:
+        * No Fuss Distance Metric Learning using Proxies.
+          Movshovitz-Attias et al.
+          AAAI 2017.
+
+    :param similarities: A batch of similarities (or negative distance) between
+                         inputs & proxies.
+    :param targets: Sparse targets.
+    :param nb_classes: Number of classes.
+    :param proxy_per_class: Number of proxy per class.
+    :return: A float scalar loss.
+    """
+    assert similarities.shape[1] == (nb_classes * proxy_per_class)
+
+    positive_proxies_mask = torch.zeros_like(similarities, dtype=torch.bool)
+    indexes = torch.arange(similarities.shape[0])
+    for i in range(proxy_per_class):
+        positive_proxies_mask[indexes, i + proxy_per_class * targets] = True
+
+    similar_pos = similarities[positive_proxies_mask].view(similarities.shape[0], proxy_per_class)
+    most_similar_pos, _ = similar_pos.max(dim=-1)
+
+    negative_proxies = ~positive_proxies_mask
+    negative_similarities = similarities[negative_proxies]
+    negative_similarities = negative_similarities.view(
+        similarities.shape[0], proxy_per_class * (nb_classes - 1)
+    )
+
+    denominator = torch.exp(negative_similarities).sum(-1)
+    numerator = most_similar_pos
+
+    denominator = torch.exp(similarities).sum(-1)
+    loss = -torch.mean(numerator - torch.log(denominator))
+    if loss < 0:
+        import pdb; pdb.set_trace()
+    return loss
+
+
 def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memory_indexes):
     memory_indexes = memory_indexes.byte()
 
@@ -46,43 +113,6 @@ def mer_loss(new_logits, old_logits):
     old_probs = F.softmax(old_logits, dim=-1)
 
     return torch.mean(((new_probs - old_probs) * torch.log(new_probs)).sum(-1), dim=0)
-
-
-def proxy_nca(similarities, targets, nb_classes, proxy_per_class):
-    """NCA with proxies.
-
-    Reference:
-        * No Fuss Distance Metric Learning using Proxies.
-          Movshovitz-Attias et al.
-          AAAI 2017.
-
-    :param similarities: A batch of similarities (or negative distance) between
-                         inputs & proxies.
-    :param targets: Sparse targets.
-    :param nb_classes: Number of classes.
-    :param proxy_per_class: Number of proxy per class.
-    :return: A float scalar loss.
-    """
-    assert similarities.shape[1] == (nb_classes * proxy_per_class)
-
-    positive_proxies_mask = torch.zeros_like(similarities).byte()
-    indexes = torch.arange(similarities.shape[0])
-    for i in range(proxy_per_class):
-        positive_proxies_mask[indexes, i + proxy_per_class * targets] = 1
-
-    similar_pos = similarities[positive_proxies_mask].view(similarities.shape[0], proxy_per_class)
-    most_similar_pos, _ = similar_pos.max(dim=-1)
-
-    negative_proxies = ~positive_proxies_mask
-    negative_similarities = similarities[negative_proxies]
-    negative_similarities = negative_similarities.view(
-        similarities.shape[0], proxy_per_class * (nb_classes - 1)
-    )
-
-    denominator = torch.exp(negative_similarities).sum(-1)
-    numerator = torch.exp(most_similar_pos)
-
-    return -torch.mean(torch.log(numerator / denominator))
 
 
 def additive_margin_softmax_ce(similarities, targets, s=30, m=0.4):
@@ -147,13 +177,12 @@ def residual_attention_distillation(list_attentions_a, list_attentions_b, use_de
         a = F.normalize(a, dim=1, p=2)
         b = F.normalize(b, dim=1, p=2)
 
-        #layer_loss = torch.frobenius_norm(a - b)
-        layer_loss = (1 - torch.mm(a, b.t())).sum()
+        layer_loss = torch.frobenius_norm(a - b)
         if use_depth_weights:
             layer_loss = depth_weights[i] * layer_loss
         loss += layer_loss
 
-    loss = loss
+    loss = 2 * loss
 
     if use_depth_weights:
         return loss
@@ -237,7 +266,7 @@ def weights_orthogonality(weights, margin=0.):
     similarities = torch.mm(normalized_weights, normalized_weights.t())
 
     # We are ignoring the diagonal made of identity similarities:
-    similarities = similarities[~torch.eye(similarities.shape[0]).byte()]
+    similarities = similarities[torch.eye(similarities.shape[0]) == 0]
 
     return torch.mean(F.relu(similarities + margin))
 
@@ -250,6 +279,7 @@ def embeddings_similarity(features_a, features_b):
 
 
 def ucir_ranking(logits, targets, n_classes, task_size, nb_negatives=2, margin=0.2):
+    return github_ucir_ranking_mr(logits, targets, n_classes, task_size, nb_negatives, margin)
     # Ranking loss maximizing the inter-class separation between old & new:
 
     # 1. Fetching from the batch only samples from the batch that belongs
@@ -272,6 +302,31 @@ def ucir_ranking(logits, targets, n_classes, task_size, nb_negatives=2, margin=0
     return F.margin_ranking_loss(
         old_values, new_values, -torch.ones(len(old_values)).to(logits.device), margin=margin
     )
+
+
+def github_ucir_ranking_mr(logits, targets, n_classes, task_size, nb_negatives=2, margin=0.2):
+    gt_index = torch.zeros(logits.size()).to(logits.device)
+    gt_index = gt_index.scatter(1, targets.view(-1,1), 1).ge(0.5)
+    gt_scores = logits.masked_select(gt_index)
+    #get top-K scores on novel classes
+    num_old_classes = logits.shape[1] - task_size
+    max_novel_scores = logits[:, num_old_classes:].topk(nb_negatives, dim=1)[0]
+    #the index of hard samples, i.e., samples of old classes
+    hard_index = targets.lt(num_old_classes)
+    hard_num = torch.nonzero(hard_index).size(0)
+    #print("hard examples size: ", hard_num)
+    if  hard_num > 0:
+        gt_scores = gt_scores[hard_index].view(-1, 1).repeat(1, nb_negatives)
+        max_novel_scores = max_novel_scores[hard_index]
+        assert(gt_scores.size() == max_novel_scores.size())
+        assert(gt_scores.size(0) == hard_num)
+        #print("hard example gt scores: ", gt_scores.size(), gt_scores)
+        #print("hard example max novel scores: ", max_novel_scores.size(), max_novel_scores)
+        loss = nn.MarginRankingLoss(margin=margin)(gt_scores.view(-1, 1), \
+            max_novel_scores.view(-1, 1), torch.ones(hard_num*nb_negatives).to(logits.device))
+        return loss
+    return torch.tensor(0).float()
+
 
 
 def n_pair_loss(logits, targets):

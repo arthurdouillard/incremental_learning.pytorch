@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import yaml
 
-from inclearn.lib import factory, results_utils, utils
+from inclearn.lib import factory, metrics, results_utils, utils
 
 
 def train(args):
@@ -46,6 +46,14 @@ def _train(args, start_date):
     results = results_utils.get_template_results(args)
 
     memory, memory_val = None, None
+    metric_logger = metrics.MetricLogger()
+
+    if args["label"] is not None:
+        folder_results = os.path.join("results", "dev", args["model"], "{}_{}".format(start_date, args["label"]))
+        os.makedirs(folder_results, exist_ok=True)
+        model.folder_result = folder_results
+    else:
+        model.folder_result = None
 
     for _ in range(inc_dataset.n_tasks):
         task_info, train_loader, val_loader, test_loader = inc_dataset.new_task(memory, memory_val)
@@ -71,18 +79,18 @@ def _train(args, start_date):
 
         print("Eval on {}->{}.".format(0, task_info["max_class"]))
         ypred, ytrue = model.eval_task(test_loader)
-        acc_stats = utils.compute_accuracy(ypred, ytrue, task_size=args["increment"])
-        print(acc_stats)
-        results["results"].append(acc_stats)
+        metric_logger.log_task(ypred, ytrue)
+
+        print(metric_logger.last_results)
+        results["results"].append(metric_logger.last_results)
 
         memory = model.get_memory()
         memory_val = model.get_val_memory()
 
-    results["average_incremental_accuracy"] = results_utils.compute_avg_inc_acc(results["results"])
+    print(
+        "Average Incremental Accuracy: {}.".format(results["results"][-1]["incremental_accuracy"])
+    )
 
-    print("Average Incremental Accuracy: {}.".format(results["average_incremental_accuracy"]))
-
-    print(args["label"])
     if args["label"] is not None:
         results_utils.save_results(results, args["label"], args["model"], start_date)
 
@@ -90,7 +98,7 @@ def _train(args, start_date):
     del inc_dataset
     #torch.cuda.empty_cache()
 
-    return results["average_incremental_accuracy"]
+    return results["results"][-1]["incremental_accuracy"]
 
 
 def _set_seed(seed):

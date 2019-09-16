@@ -39,7 +39,10 @@ def extract(paths, avg_inc=False):
             data = json.load(f)
 
         if isinstance(data["results"][0], dict):
-            accs = [100 * task["total"] for task in data["results"]]
+            if "total" in data["results"][0]:
+                accs = [100 * task["total"] for task in data["results"]]
+            else:
+                accs = [100 * task["accuracy"]["total"] for task in data["results"]]
         elif isinstance(data["results"][0], float):
             accs = [100 * task_acc for task_acc in data["results"]]
         else:
@@ -175,7 +178,7 @@ def plot(results, increment, total, initial_increment=None, title="", path_to_sa
             print(label)
             raise
 
-    plt.legend(loc="upper right", bbox_to_anchor=(2., 1.0))
+    plt.legend(loc="upper right")#, bbox_to_anchor=(2., 1.0))
     plt.xlabel("Number of classes")
     plt.ylabel("Accuracy over seen classes")
     plt.title(title)

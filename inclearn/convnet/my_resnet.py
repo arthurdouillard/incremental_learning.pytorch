@@ -11,8 +11,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
 
+from inclearn.lib import pooling
+
 
 class DownsampleStride(nn.Module):
+
     def __init__(self, n=2):
         super(DownsampleStride, self).__init__()
         self._n = n
@@ -36,7 +39,9 @@ class ResidualBlock(nn.Module):
             first_stride = 1
             planes = inplanes
 
-        self.conv_a = nn.Conv2d(inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False)
+        self.conv_a = nn.Conv2d(
+            inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
+        )
         self.bn_a = nn.BatchNorm2d(planes)
 
         self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
@@ -80,7 +85,9 @@ class PreActResidualBlock(nn.Module):
             planes = inplanes
 
         self.bn_a = nn.BatchNorm2d(inplanes)
-        self.conv_a = nn.Conv2d(inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False)
+        self.conv_a = nn.Conv2d(
+            inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
+        )
 
         self.bn_b = nn.BatchNorm2d(planes)
         self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
@@ -114,7 +121,15 @@ class CifarResNet(nn.Module):
     https://arxiv.org/abs/1512.03385.pdf
     """
 
-    def __init__(self, n=5, channels=3, preact=False, zero_residual=True, **kwargs):
+    def __init__(
+        self,
+        n=5,
+        channels=3,
+        preact=False,
+        zero_residual=True,
+        pooling_config={"type": "avg"},
+        **kwargs
+    ):
         """ Constructor
         Args:
           depth: number of layers.
@@ -133,11 +148,17 @@ class CifarResNet(nn.Module):
 
         self.inplanes = 16
         self.stage_1 = self._make_layer(Block, 16, increase_dim=False, n=n)
-        self.stage_2 = self._make_layer(Block, 16, increase_dim=True, n=n-1)
-        self.stage_3 = self._make_layer(Block, 32, increase_dim=True, n=n-2)
+        self.stage_2 = self._make_layer(Block, 16, increase_dim=True, n=n - 1)
+        self.stage_3 = self._make_layer(Block, 32, increase_dim=True, n=n - 2)
         self.stage_4 = Block(64, increase_dim=False, last=True)
 
-        self.avgpool = nn.AvgPool2d(8)
+        if pooling_config["type"] == "avg":
+            self.pool = nn.AvgPool2d(8)
+        elif pooling_config["type"] == "weldon":
+            self.pool = pooling.WeldonPool2d(**pooling_config)
+        else:
+            raise ValueError("Unknown pooling type {}.".format(pooling_config["type"]))
+
         self.out_dim = 64
 
         for m in self.modules():
@@ -156,9 +177,7 @@ class CifarResNet(nn.Module):
         layers = []
 
         if increase_dim:
-            layers.append(
-                Block(planes, increase_dim=True)
-            )
+            layers.append(Block(planes, increase_dim=True))
             planes = 2 * planes
 
         for i in range(n):
@@ -183,7 +202,7 @@ class CifarResNet(nn.Module):
         return raw_features, features
 
     def end_features(self, x):
-        x = self.avgpool(x)
+        x = self.pool(x)
         x = x.view(x.size(0), -1)
 
         return x

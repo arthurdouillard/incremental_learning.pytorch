@@ -16,7 +16,6 @@ class BasicNet(nn.Module):
         classifier_kwargs={},
         postprocessor_kwargs={},
         init="kaiming",
-        classifier_type="fc",
         device=None,
         return_features=False,
         extract_no_act=False,
@@ -25,25 +24,29 @@ class BasicNet(nn.Module):
     ):
         super(BasicNet, self).__init__()
 
-        if postprocessor_kwargs["type"] == "learned_scaling":
+        if postprocessor_kwargs.get("type") == "learned_scaling":
             self.post_processor = FactorScalar(**postprocessor_kwargs)
-        elif postprocessor_kwargs["type"] == "heatedup":
+        elif postprocessor_kwargs.get("type") == "heatedup":
             self.post_processor = HeatedUpScalar(**postprocessor_kwargs)
         else:
             self.post_processor = None
 
         self.convnet = factory.get_convnet(convnet_type, **convnet_kwargs)
 
-        if classifier_type == "fc":
+        if "type" not in classifier_kwargs:
+            raise ValueError("Specify a classifier!", classifier_kwargs)
+        if classifier_kwargs["type"] == "fc":
             self.classifier = Classifier(self.convnet.out_dim, device=device, **classifier_kwargs)
-        elif classifier_type == "cosine":
+        elif classifier_kwargs["type"] == "cosine":
             self.classifier = CosineClassifier(
                 self.convnet.out_dim, device=device, **classifier_kwargs
             )
-        elif classifier_type is None or classifier_type == "none":
+        elif classifier_kwargs["type"] == "proxynca":
+            self.classifier = ProxyNCA(self.convnet.out_dim, device=device, **classifier_kwargs)
+        elif classifier_kwargs["type"] is None or classifier_kwargs["type"] == "none":
             self.classifier = lambda x: x
         else:
-            raise ValueError("Unknown classifier type {}.".format(classifier_type))
+            raise ValueError("Unknown classifier type {}.".format(classifier_kwargs["type"]))
 
         self.return_features = return_features
         self.extract_no_act = extract_no_act
@@ -63,6 +66,12 @@ class BasicNet(nn.Module):
             self.classifier.on_task_end()
         if isinstance(self.post_processor, nn.Module):
             self.post_processor.on_task_end()
+
+    def on_epoch_end(self):
+        if isinstance(self.classifier, nn.Module):
+            self.classifier.on_epoch_end()
+        if isinstance(self.post_processor, nn.Module):
+            self.post_processor.on_epoch_end()
 
     def forward(self, x):
         outputs = self.convnet(x, attention_hook=self.attention_hook)
@@ -94,8 +103,11 @@ class BasicNet(nn.Module):
     def add_classes(self, n_classes):
         self.classifier.add_classes(n_classes)
 
-    def add_imprinted_classes(self, class_indexes, inc_dataset):
-        return self.classifier.add_imprinted_classes(class_indexes, inc_dataset, self)
+    def add_imprinted_classes(self, class_indexes, inc_dataset, **kwargs):
+        self.classifier.add_imprinted_classes(class_indexes, inc_dataset, self, **kwargs)
+
+    def add_custom_weights(self, weights):
+        self.classifier.add_custom_weights(weights)
 
     def extract(self, x):
         raw_features, features = self.convnet(x)
@@ -103,10 +115,23 @@ class BasicNet(nn.Module):
             return raw_features
         return features
 
-    def freeze(self):
-        for param in self.parameters():
-            param.requires_grad = False
-        self.eval()
+    def freeze(self, trainable=False, model="all"):
+        if model == "all":
+            model = self
+        elif model == "convnet":
+            model = self.convnet
+        elif model == "classifier":
+            model = self.classifier
+        else:
+            assert False, model
+
+        for param in model.parameters():
+            param.requires_grad = trainable
+
+        if not trainable:
+            model.eval()
+        else:
+            model.train()
 
         return self
 
@@ -120,7 +145,9 @@ class BasicNet(nn.Module):
 
 class Classifier(nn.Module):
 
-    def __init__(self, features_dim, *, use_bias, use_multi_fc, init, device, **kwargs):
+    def __init__(
+        self, features_dim, *, use_bias, use_multi_fc=False, init="kaiming", device, **kwargs
+    ):
         super().__init__()
 
         self.features_dim = features_dim
@@ -134,6 +161,9 @@ class Classifier(nn.Module):
         self.classifier = None
 
     def on_task_end(self):
+        pass
+
+    def on_epoch_end(self):
         pass
 
     def forward(self, features):
@@ -193,7 +223,17 @@ class Classifier(nn.Module):
 
 class CosineClassifier(nn.Module):
 
-    def __init__(self, features_dim, device, *, use_bias=False, proxy_per_class=1, **kwargs):
+    def __init__(
+        self,
+        features_dim,
+        device,
+        *,
+        use_bias=False,
+        proxy_per_class=1,
+        bn_normalize=False,
+        freeze_bn=False,
+        type=None
+    ):
         super().__init__()
 
         self.n_classes = 0
@@ -204,22 +244,62 @@ class CosineClassifier(nn.Module):
         self.proxy_per_class = proxy_per_class
         self.device = device
 
+        if bn_normalize:
+            print("Normalizing with BN.")
+            self.bn = nn.BatchNorm1d(features_dim, affine=False)
+        else:
+            self.bn = None
+
+        if proxy_per_class > 1:
+            print("Using {} proxies per class.".format(proxy_per_class))
+
+        self.freeze_bn = freeze_bn
+        self._task_idx = 0
+
     def on_task_end(self):
+        self._task_idx += 1
+
+    def on_epoch_end(self):
         pass
 
     def forward(self, features):
-        features_norm = features / (features.norm(dim=1)[:, None] + 1e-8)
+        if self.bn:
+            if self.freeze_bn and self._task_idx > 0 and self.bn.training:
+                self.bn.eval()
+            features_norm = self.bn(features)
+            if self.use_bias:
+                features_norm = features_norm
+        else:
+            features_norm = features / (features.norm(dim=1)[:, None] + 1e-8)
+
         weights_norm = self.weights / (self.weights.norm(dim=1)[:, None] + 1e-8)
+
         similarities = torch.mm(features_norm, weights_norm.transpose(0, 1))
 
         if self.use_bias:
-            similarities = similarities + self.bias
+            similarities += self.bias
 
         return similarities
 
+    def add_custom_weights(self, weights):
+        weights = torch.tensor(weights)
+
+        if self.weights is not None:
+            placeholder = nn.Parameter(torch.zeros(
+                self.weights.shape[0] + weights.shape[0], self.features_dim))
+            placeholder.data[:self.weights.shape[0]] = copy.deepcopy(self.weights.data)
+            placeholder.data[self.weights.shape[0]:] = weights
+
+            self.weights = placeholder
+        else:
+            self.weights = weights
+
+        self.to(self.device)
+
     def add_classes(self, n_classes):
         new_weights = nn.Parameter(
-            torch.zeros(self.n_classes + self.proxy_per_class * n_classes, self.features_dim)
+            torch.zeros(
+                self.proxy_per_class * (self.n_classes + n_classes), self.features_dim)
         )
         nn.init.kaiming_normal_(new_weights, nonlinearity="linear")
 
@@ -231,7 +311,7 @@ class CosineClassifier(nn.Module):
         self.weights = new_weights
 
         if self.use_bias:
-            new_bias = nn.Parameter(torch.zeros(self.n_classes + self.proxy_per_class * n_classes))
+            new_bias = nn.Parameter(torch.zeros(self.proxy_per_class * (self.n_classes + n_classes)))
             nn.init.constant_(new_bias, 0.1)
             if self.bias is not None:
                 new_bias.data[:self.n_classes *
@@ -242,10 +322,9 @@ class CosineClassifier(nn.Module):
 
         self.to(self.device)
         self.n_classes += n_classes
-
         return self
 
-    def add_imprinted_classes(self, class_indexes, inc_dataset, network):
+    def add_imprinted_classes(self, class_indexes, inc_dataset, network, use_weights_norm=True):
         # We are assuming the class indexes are contiguous!
         n_classes = self.n_classes
         self.add_classes(len(class_indexes))
@@ -254,6 +333,9 @@ class CosineClassifier(nn.Module):
 
         weights_norm = self.weights.data.norm(dim=1, keepdim=True)
         avg_weights_norm = torch.mean(weights_norm, dim=0).cpu()
+        if not use_weights_norm:
+            print("Not using avg weight norm")
+            avg_weights_norm = torch.ones_like(avg_weights_norm)
 
         new_weights = []
         for class_index in class_indexes:
@@ -262,18 +344,117 @@ class CosineClassifier(nn.Module):
 
             features_normalized = F.normalize(torch.from_numpy(features), p=2, dim=1)
             class_embeddings = torch.mean(features_normalized, dim=0)
+            class_embeddings = F.normalize(class_embeddings, dim=0, p=2)
 
-            imprinted_weights = F.normalize(class_embeddings, p=2, dim=0) * avg_weights_norm
+            if self.proxy_per_class == 1:
+                new_weights.append(class_embeddings * avg_weights_norm)
+            else:
+                std = torch.std(features_normalized, dim=0)
 
-            for _ in range(self.proxy_per_class):
-                # TODO could lead to bad performance if proxy_per_class > 1.
-                # TODO add noise to differentiate them
-                new_weights.append(imprinted_weights)
+                for _ in range(self.proxy_per_class):
+                    new_weights.append(
+                        torch.normal(class_embeddings, std) * avg_weights_norm
+                    )
 
         new_weights = torch.stack(new_weights)
-        self.weights.data[-len(class_indexes):] = new_weights.to(self.device)
+        self.weights.data[-new_weights.shape[0]:] = new_weights.to(self.device)
 
         return self
+
+
+class ProxyNCA(CosineClassifier):
+
+    def __init__(
+        self,
+        *args,
+        use_scaling=True,
+        pre_relu=False,
+        linear_end_relu=False,
+        linear=False,
+        mulfactor=3,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        if use_scaling is True:
+            self._scaling = FactorScalar(1.)
+        elif use_scaling == "heatedup":
+            self._scaling = HeatedUpScalar(16, 4, 6)
+        else:
+            self._scaling = lambda x: x
+
+        if linear:
+            self.linear = nn.Linear(64, 64)
+        else:
+            self.linear = lambda x: x
+
+        self.mulfactor = mulfactor
+        self.linear_end_relu = linear_end_relu
+        self.pre_relu = pre_relu
+        print("Proxy nca")
+
+    def on_task_end(self):
+        super().on_task_end()
+        if isinstance(self._scaling, nn.Module):
+            self._scaling.on_task_end()
+
+    def forward(self, features):
+        if self.pre_relu:
+            features = F.relu(features)
+        features = self.linear(features)
+        if self.linear_end_relu:
+            features = F.relu(features)
+
+        P = self.weights
+        P = self.mulfactor * F.normalize(P, p=2, dim=-1)
+        X = self.mulfactor * F.normalize(features, p=2, dim=-1)
+        D = self.pairwise_distance(torch.cat([X, P]), squared=True)[:X.size()[0], X.size()[0]:]
+
+        if self.proxy_per_class > 1:
+            D = self._reduce_proxies(D)
+
+        return self._scaling(D)
+
+    def _reduce_proxies(self, similarities):
+        # shape (batch_size, n_classes * proxy_per_class)
+        assert similarities.shape[1] == self.n_classes * self.proxy_per_class
+        return similarities.view(-1, self.n_classes, self.proxy_per_class).mean(-1)
+
+    @staticmethod
+    def pairwise_distance(a, squared=False):
+        """Computes the pairwise distance matrix with numerical stability."""
+        pairwise_distances_squared = torch.add(
+            a.pow(2).sum(dim=1, keepdim=True).expand(a.size(0), -1),
+            torch.t(a).pow(2).sum(dim=0, keepdim=True).expand(a.size(0), -1)
+        ) - 2 * (torch.mm(a, torch.t(a)))
+
+        # Deal with numerical inaccuracies. Set small negatives to zero.
+        pairwise_distances_squared = torch.clamp(pairwise_distances_squared, min=0.0)
+
+        # Get the mask where the zero distances are at.
+        error_mask = torch.le(pairwise_distances_squared, 0.0)
+
+        # Optionally take the sqrt.
+        if squared:
+            pairwise_distances = pairwise_distances_squared
+        else:
+            pairwise_distances = torch.sqrt(pairwise_distances_squared + error_mask.float() * 1e-16)
+
+        # Undo conditionally adding 1e-16.
+        pairwise_distances = torch.mul(pairwise_distances, (error_mask == False).float())
+
+        # Explicitly set diagonals to zero.
+        mask_offdiagonals = 1 - torch.eye(
+            *pairwise_distances.size(), device=pairwise_distances.device
+        )
+        pairwise_distances = torch.mul(pairwise_distances, mask_offdiagonals)
+
+        return pairwise_distances
+
+
+# ---------------
+# Post processing
+# ---------------
 
 
 class FactorScalar(nn.Module):
@@ -286,16 +467,21 @@ class FactorScalar(nn.Module):
     def on_task_end(self):
         pass
 
+    def on_epoch_end(self):
+        pass
+
     def forward(self, inputs):
         return self.scale * inputs
 
 
 class HeatedUpScalar(nn.Module):
-    def __init__(self, first_value, last_value, nb_steps, **kwargs):
+
+    def __init__(self, first_value, last_value, nb_steps, scope="task", **kwargs):
         super().__init__()
 
+        self.scope = scope
         self.first_value = first_value
-        self.step = (max(first_value, last_value) - min(first_value, last_value)) / nb_steps
+        self.step = (max(first_value, last_value) - min(first_value, last_value)) / (nb_steps - 1)
 
         if first_value > last_value:
             self._factor = -1
@@ -304,11 +490,16 @@ class HeatedUpScalar(nn.Module):
 
         self._increment = 0
 
-        print("Heated-up factor is {}.".format(self.factor))
+        print("Heated-up factor is {} with {} scope.".format(self.factor, self.scope))
 
     def on_task_end(self):
-        self._increment += 1
+        if self.scope == "task":
+            self._increment += 1
         print("Heated-up factor is {}.".format(self.factor))
+
+    def on_epoch_end(self):
+        if self.scope == "epoch":
+            self._increment += 1
 
     @property
     def factor(self):
@@ -316,8 +507,6 @@ class HeatedUpScalar(nn.Module):
 
     def forward(self, inputs):
         return self.factor * inputs
-
-
 
 # -------------
 # Recalibration
