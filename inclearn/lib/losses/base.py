@@ -4,28 +4,27 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def binarize_and_smooth_labels(T, nb_classes, smoothing_const = 0.1):
+def binarize_and_smooth_labels(T, nb_classes, smoothing_const=0.1):
     import sklearn.preprocessing
     T = T.cpu().numpy()
-    T = sklearn.preprocessing.label_binarize(
-        T, classes = range(0, nb_classes)
-    )
+    T = sklearn.preprocessing.label_binarize(T, classes=range(0, nb_classes))
     T = T * (1 - smoothing_const)
     T[T == 0] = smoothing_const / (nb_classes - 1)
     T = torch.FloatTensor(T)
     return T
 
 
-def proxy_nca_github(D, targets, nb_classes):
+def proxy_nca_github(D, targets, nb_classes, **config):
     #return proxy_nca(-D, targets, nb_classes, 1)
 
-    T = binarize_and_smooth_labels(
-        T=targets, nb_classes=nb_classes, smoothing_const=0.
-    ).to(targets.device)
+    T = binarize_and_smooth_labels(T=targets, nb_classes=nb_classes,
+                                   smoothing_const=0.).to(targets.device)
 
     # cross entropy with distances as logits, one hot labels
     # note that compared to proxy nca, positive not excluded in denominator
-    loss = torch.sum(- T * F.log_softmax(D, -1), -1)
+    #loss = torch.sum(-T * F.log_softmax(D, -1), -1)
+    loss = additive_margin_softmax_ce(D, targets, **config)
+    return loss
 
     return loss.mean()
 
@@ -67,7 +66,8 @@ def proxy_nca(similarities, targets, nb_classes, proxy_per_class):
     denominator = torch.exp(similarities).sum(-1)
     loss = -torch.mean(numerator - torch.log(denominator))
     if loss < 0:
-        import pdb; pdb.set_trace()
+        import pdb
+        pdb.set_trace()
     return loss
 
 
@@ -97,25 +97,7 @@ def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memo
     return loss
 
 
-def mer_loss(new_logits, old_logits):
-    """Distillation loss that is less important if the new model is unconfident.
-
-    Reference:
-        * Kim et al.
-          Incremental Learning with Maximum Entropy Regularization: Rethinking
-          Forgetting and Intransigence.
-
-    :param new_logits: Logits from the new (student) model.
-    :param old_logits: Logits from the old (teacher) model.
-    :return: A float scalar loss.
-    """
-    new_probs = F.softmax(new_logits, dim=-1)
-    old_probs = F.softmax(old_logits, dim=-1)
-
-    return torch.mean(((new_probs - old_probs) * torch.log(new_probs)).sum(-1), dim=0)
-
-
-def additive_margin_softmax_ce(similarities, targets, s=30, m=0.4):
+def additive_margin_softmax_ce(similarities, targets, s=1, m=0.):
     """Compute AMS cross-entropy loss.
 
     Reference:
@@ -132,6 +114,11 @@ def additive_margin_softmax_ce(similarities, targets, s=30, m=0.4):
     :param m: Margin applied on the "right" similarities.
     :return: A float scalar loss.
     """
+    # Ensure numerically stable computation:
+    max_values = similarities.max(dim=1)[0].view(-1, 1).repeat(1, similarities.shape[1])
+    max_values.data[max_values.data < 0.] = 0.
+    similarities = similarities - max_values
+
     numerator = s * (torch.diagonal(similarities.transpose(0, 1)[targets]) - m)
 
     neg_denominator = torch.exp(s * similarities)
@@ -141,134 +128,8 @@ def additive_margin_softmax_ce(similarities, targets, s=30, m=0.4):
 
     denominator = torch.exp(numerator) + torch.sum(neg_denominator, dim=1)
     loss = numerator - torch.log(denominator)
-    return -torch.mean(loss)
-
-
-def residual_attention_distillation(list_attentions_a, list_attentions_b, use_depth_weights=True):
-    """Residual attention distillation between several attention maps between
-    a teacher and a student network.
-
-    Reference:
-        * S. Zagoruyko and N. Komodakis.
-          Paying more attention to attention: Improving the performance of
-          convolutional neural networks via attention transfer.
-          ICLR 2016.
-
-    :param list_attentions_a: A list of attention maps, each of shape (b, n, w, h).
-    :param list_attentions_b: A list of attention maps, each of shape (b, n, w, h).
-    :return: A float scalar loss.
-    """
-    assert len(list_attentions_a) == len(list_attentions_b)
-
-    depth_weights = torch.tensor(list(range(len(list_attentions_a), -1, -1))) + 1
-    depth_weights = F.normalize(depth_weights.float(), dim=0).to(list_attentions_a[0].device)
-
-    loss = 0.
-    for i, (a, b) in enumerate(zip(list_attentions_a, list_attentions_b)):
-        # shape of (b, n, w, h)
-        assert a.shape == b.shape
-
-        a = torch.pow(a, 2)
-        b = torch.pow(b, 2)
-
-        a = a.sum(dim=1).view(a.shape[0], -1)  # shape of (b, w * h)
-        b = b.sum(dim=1).view(b.shape[0], -1)
-
-        a = F.normalize(a, dim=1, p=2)
-        b = F.normalize(b, dim=1, p=2)
-
-        layer_loss = torch.frobenius_norm(a - b)
-        if use_depth_weights:
-            layer_loss = depth_weights[i] * layer_loss
-        loss += layer_loss
-
-    loss = 2 * loss
-
-    if use_depth_weights:
-        return loss
-    return loss / len(list_attentions_a)
-
-
-def relative_teacher_distances(features_a, features_b, normalize_features=False):
-    """Distillation loss between the teacher and the student comparing distances
-    instead of embeddings.
-
-    Reference:
-        * Lu Yu et al.
-          Learning Metrics from Teachers: Compact Networks for Image Embedding.
-          CVPR 2019.
-
-    :param features_a: ConvNet features of a model.
-    :param features_b: ConvNet features of a model.
-    :return: A float scalar loss.
-    """
-    if normalize_features:
-        features_a = F.normalize(features_a, dim=-1, p=2)
-        features_b = F.normalize(features_b, dim=-1, p=2)
-
-    pairwise_distances_a = torch.pdist(features_a, p=2)
-    pairwise_distances_b = torch.pdist(features_b, p=2)
-
-    return torch.mean(torch.abs(pairwise_distances_a - pairwise_distances_b))
-
-
-def global_orthogonal_regularization(features, targets, normalize=False):
-    """Global Orthogonal Regularization (GOR) forces features of different
-    classes to be orthogonal.
-
-    # Reference:
-        * Learning Spread-out Local Feature Descriptors.
-          Zhang et al.
-          ICCV 2016.
-
-    :param features: A flattened extracted features.
-    :param targets: Sparse targets.
-    :return: A float scalar loss.
-    """
-    if normalize:
-        features = F.normalize(features, dim=1, p=2)
-
-    positive_indexes, negative_indexes = [], []
-
-    targets = targets.cpu().numpy()
-    for target in set(targets):
-        positive_index = np.random.choice(np.where(targets == target)[0], 1)
-        negative_index = np.random.choice(np.where(targets != target)[0], 1)
-
-        positive_indexes.append(positive_index)
-        negative_indexes.append(negative_index)
-
-    positive_indexes = torch.LongTensor(positive_indexes)
-    negative_indexes = torch.LongTensor(negative_indexes)
-
-    positive_features = features[positive_indexes]
-    negative_features = features[negative_indexes]
-
-    similarities = torch.sum(torch.mul(positive_features, negative_features), 1)
-    features_dim = features.shape[1]
-
-    first_moment = torch.mean(similarities)
-    second_moment = torch.mean(torch.pow(similarities, 2))
-
-    loss = torch.pow(first_moment, 2) + torch.clamp(second_moment - 1./features_dim, min=0.)
-
+    loss = -torch.mean(loss)
     return loss
-
-
-def weights_orthogonality(weights, margin=0.):
-    """Regularization forcing the weights to be disimilar.
-
-    :param weights: Learned parameters of shape (n_classes, n_features).
-    :param margin: Margin to force even more the orthogonality.
-    :return: A float scalar loss.
-    """
-    normalized_weights = F.normalize(weights, dim=1, p=2)
-    similarities = torch.mm(normalized_weights, normalized_weights.t())
-
-    # We are ignoring the diagonal made of identity similarities:
-    similarities = similarities[torch.eye(similarities.shape[0]) == 0]
-
-    return torch.mean(F.relu(similarities + margin))
 
 
 def embeddings_similarity(features_a, features_b):
@@ -306,7 +167,7 @@ def ucir_ranking(logits, targets, n_classes, task_size, nb_negatives=2, margin=0
 
 def github_ucir_ranking_mr(logits, targets, n_classes, task_size, nb_negatives=2, margin=0.2):
     gt_index = torch.zeros(logits.size()).to(logits.device)
-    gt_index = gt_index.scatter(1, targets.view(-1,1), 1).ge(0.5)
+    gt_index = gt_index.scatter(1, targets.view(-1, 1), 1).ge(0.5)
     gt_scores = logits.masked_select(gt_index)
     #get top-K scores on novel classes
     num_old_classes = logits.shape[1] - task_size
@@ -315,18 +176,17 @@ def github_ucir_ranking_mr(logits, targets, n_classes, task_size, nb_negatives=2
     hard_index = targets.lt(num_old_classes)
     hard_num = torch.nonzero(hard_index).size(0)
     #print("hard examples size: ", hard_num)
-    if  hard_num > 0:
+    if hard_num > 0:
         gt_scores = gt_scores[hard_index].view(-1, 1).repeat(1, nb_negatives)
         max_novel_scores = max_novel_scores[hard_index]
-        assert(gt_scores.size() == max_novel_scores.size())
-        assert(gt_scores.size(0) == hard_num)
+        assert (gt_scores.size() == max_novel_scores.size())
+        assert (gt_scores.size(0) == hard_num)
         #print("hard example gt scores: ", gt_scores.size(), gt_scores)
         #print("hard example max novel scores: ", max_novel_scores.size(), max_novel_scores)
         loss = nn.MarginRankingLoss(margin=margin)(gt_scores.view(-1, 1), \
             max_novel_scores.view(-1, 1), torch.ones(hard_num*nb_negatives).to(logits.device))
         return loss
     return torch.tensor(0).float()
-
 
 
 def n_pair_loss(logits, targets):
