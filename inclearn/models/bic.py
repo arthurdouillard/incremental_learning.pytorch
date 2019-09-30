@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from inclearn.lib import calibration, herding, utils
+from inclearn.lib import calibration, herding, losses, utils
 from inclearn.models.icarl import ICarl
 
 EPSILON = 1e-8
@@ -59,12 +59,12 @@ class BiC(ICarl):
     def _eval_task(self, loader):
         ypred, ytrue = [], []
 
-        for inputs, targets, _ in loader:
-            logits = self._network(inputs.to(self._device))
+        for input_dict in loader:
+            logits = self._network(input_dict["inputs"].to(self._device))
             if self._task > 0:
                 logits = self._bic(logits)
 
-            ytrue.append(targets.numpy())
+            ytrue.append(input_dict["targets"].numpy())
             ypred.append(torch.softmax(logits, dim=1).argmax(dim=1).cpu().numpy())
 
         ytrue = np.concatenate(ytrue)
@@ -82,6 +82,13 @@ class BiC(ICarl):
                 logits[..., :-self._task_size] / self._temperature,
                 torch.sigmoid(old_targets / self._temperature)
             )
+
+        if self._rotations_config:
+            rotations_loss = losses.unsupervised_rotations(
+                inputs, memory_flags, self._network, self._rotations_config
+            )
+            loss += rotations_loss
+            self._metrics["rot"] += rotations_loss.item()
 
         return loss
 

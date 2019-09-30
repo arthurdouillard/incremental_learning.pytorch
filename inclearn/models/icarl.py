@@ -9,7 +9,7 @@ from scipy.spatial.distance import cdist
 from torch.nn import functional as F
 from tqdm import tqdm
 
-from inclearn.lib import factory, herding, network, schedulers, utils
+from inclearn.lib import factory, herding, losses, network, schedulers, utils
 from inclearn.models.base import IncrementalLearner
 
 EPSILON = 1e-8
@@ -40,13 +40,16 @@ class ICarl(IncrementalLearner):
         self._scheduling = args["scheduling"]
         self._lr_decay = args["lr_decay"]
 
-        self._warmup_config = args.get("warmup")
-        if self._warmup_config["total_epoch"] > 0:
+        self._warmup_config = args.get("warmup", {})
+        if self._warmup_config and self._warmup_config["total_epoch"] > 0:
             self._lr /= self._warmup_config["multiplier"]
 
         self._memory_size = args["memory_size"]
         self._fixed_memory = args["fixed_memory"]
+        self._herding_selection = args.get("herding_selection", "icarl")
         self._n_classes = 0
+
+        self._rotations_config = args.get("rotations_config", {})
 
         self._network = network.BasicNet(
             args["convnet"],
@@ -57,7 +60,8 @@ class ICarl(IncrementalLearner):
             }),
             device=self._device,
             extract_no_act=True,
-            classifier_no_act=False
+            classifier_no_act=False,
+            rotations_predictor=bool(self._rotations_config)
         )
 
         self._examplars = {}
@@ -120,12 +124,13 @@ class ICarl(IncrementalLearner):
                 ascii=True,
                 bar_format="{desc}: {percentage:3.0f}% | {n_fmt}/{total_fmt} | {rate_fmt}{postfix}"
             )
-            for i, (inputs, targets, memory_flags) in enumerate(prog_bar, start=1):
-                self._optimizer.zero_grad()
+            for i, input_dict in enumerate(prog_bar, start=1):
+                inputs, targets = input_dict["inputs"], input_dict["targets"]
+                memory_flags = input_dict["memory_flags"]
 
+                self._optimizer.zero_grad()
                 loss = self._forward_loss(inputs, targets, memory_flags)
                 loss.backward()
-
                 self._optimizer.step()
 
                 self._print_metrics(prog_bar, epoch, nb_epochs, i)
@@ -197,6 +202,13 @@ class ICarl(IncrementalLearner):
 
             loss = F.binary_cross_entropy_with_logits(logits, new_targets)
 
+        if self._rotations_config:
+            rotations_loss = losses.unsupervised_rotations(
+                inputs, memory_flags, self._network, self._rotations_config
+            )
+            loss += rotations_loss
+            self._metrics["rot"] += rotations_loss.item()
+
         return loss
 
     def _compute_predictions(self, data_loader):
@@ -266,7 +278,18 @@ class ICarl(IncrementalLearner):
 
             if class_idx >= self._n_classes - self._task_size:
                 # New class, selecting the examplars:
-                herding_indexes.append(herding.icarl_selection(features, memory_per_class))
+                if self._herding_selection == "icarl":
+                    selected_indexes = herding.icarl_selection(features, memory_per_class)
+                elif self._herding_selection == "closest":
+                    selected_indexes = herding.closest_to_mean(features, memory_per_class)
+                elif self._herding_selection == "random":
+                    selected_indexes = np.random.permutation(len(features))[:memory_per_class]
+                else:
+                    raise ValueError(
+                        "Unknown herding selection {}.".format(self._herding_selection)
+                    )
+
+                herding_indexes.append(selected_indexes)
 
             # Reducing examplars:
             selected_indexes = herding_indexes[class_idx][:memory_per_class]

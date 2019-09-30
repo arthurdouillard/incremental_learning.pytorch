@@ -26,6 +26,7 @@ class UCIR(ICarl):
 
         self._scheduling = args["scheduling"]
         self._lr_decay = args["lr_decay"]
+        self._herding_selection = args.get("herding_selection", "icarl")
 
         self._memory_size = args["memory_size"]
         self._fixed_memory = args["fixed_memory"]
@@ -58,7 +59,7 @@ class UCIR(ICarl):
         self._old_model = None
 
         self._warmup_config = args.get("warmup")
-        if self._warmup_config["total_epoch"] > 0:
+        if self._warmup_config and self._warmup_config["total_epoch"] > 0:
             self._lr /= self._warmup_config["multiplier"]
 
         self._lambda = args.get("base_lambda", 5)
@@ -112,12 +113,13 @@ class UCIR(ICarl):
             raise ValueError(self._eval_type)
 
     def _gen_weights(self):
-        utils.add_new_weights(
-            self._network,
-            self._weight_generation if self._task == 0 else "basic",
-            self._n_classes, self._task_size,
-            self.inc_dataset
-        )
+        if self._weight_generation:
+            utils.add_new_weights(
+                self._network,
+                self._weight_generation if self._task == 0 else "basic",
+                self._n_classes, self._task_size,
+                self.inc_dataset
+            )
 
     def _before_task(self, train_loader, val_loader):
         self._gen_weights()
