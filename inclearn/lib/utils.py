@@ -48,9 +48,11 @@ def extract_features(model, loader):
     state = model.training
     model.eval()
 
-    for _inputs, _targets, _ in loader:
+    for input_dict in loader:
+        inputs, _targets = input_dict["inputs"], input_dict["targets"]
+
         _targets = _targets.numpy()
-        _features = model.extract(_inputs.to(model.device)).detach().cpu().numpy()
+        _features = model.extract(inputs.to(model.device)).detach().cpu().numpy()
 
         features.append(_features)
         targets.append(_targets)
@@ -63,9 +65,10 @@ def extract_features(model, loader):
 def classify(model, loader):
     targets, predictions = [], []
 
-    for _inputs, _targets, _ in loader:
-        _targets = _targets.numpy()
-        outputs = model(_inputs.to(model.device))
+    for input_dict in loader:
+        inputs, _targets = input_dict["inputs"], input_dict["targets"]
+
+        outputs = model(inputs.to(model.device))
         if not isinstance(outputs, list):
             outputs = [outputs]
 
@@ -188,3 +191,11 @@ def apply_knn(features, targets, features_test, targets_test, nb_neighbors, pre_
 def select_class_samples(samples, targets, selected_class):
     indexes = np.where(targets == selected_class)[0]
     return samples[indexes], targets[indexes]
+
+
+def matrix_infinity_norm(matrix):
+    # Matrix is of shape (w, h)
+    matrix = torch.abs(matrix)
+
+    summed_col = matrix.sum(1)  # Shape (w,)
+    return torch.max(summed_col)

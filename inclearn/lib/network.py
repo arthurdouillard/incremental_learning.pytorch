@@ -20,7 +20,9 @@ class BasicNet(nn.Module):
         return_features=False,
         extract_no_act=False,
         classifier_no_act=False,
-        attention_hook=False
+        attention_hook=False,
+        rotations_predictor=False,
+        dropout=0.
     ):
         super(BasicNet, self).__init__()
 
@@ -47,6 +49,17 @@ class BasicNet(nn.Module):
             self.classifier = lambda x: x
         else:
             raise ValueError("Unknown classifier type {}.".format(classifier_kwargs["type"]))
+
+        if rotations_predictor:
+            print("Using a rotations predictor.")
+            self.rotations_predictor = nn.Linear(self.convnet.out_dim, 4)
+        else:
+            self.rotations_predictor = None
+
+        if dropout:
+            self.dropout = nn.Dropout2d(dropout)
+        else:
+            self.dropout = lambda x: x
 
         self.return_features = return_features
         self.extract_no_act = extract_no_act
@@ -75,7 +88,8 @@ class BasicNet(nn.Module):
 
     def forward(self, x):
         outputs = self.convnet(x, attention_hook=self.attention_hook)
-        logits = self.classifier(outputs[0] if self.classifier_no_act else outputs[1])
+        selected_outputs = outputs[0] if self.classifier_no_act else outputs[1]
+        logits = self.classifier(self.dropout(selected_outputs))
 
         if self.return_features:
             to_return = []
@@ -101,19 +115,27 @@ class BasicNet(nn.Module):
         return self.convnet.out_dim
 
     def add_classes(self, n_classes):
-        self.classifier.add_classes(n_classes)
+        if hasattr(self.classifier, "add_classes"):
+            self.classifier.add_classes(n_classes)
 
     def add_imprinted_classes(self, class_indexes, inc_dataset, **kwargs):
-        self.classifier.add_imprinted_classes(class_indexes, inc_dataset, self, **kwargs)
+        if hasattr(self.classifier, "add_imprinted_classes"):
+            self.classifier.add_imprinted_classes(class_indexes, inc_dataset, self, **kwargs)
 
     def add_custom_weights(self, weights):
-        self.classifier.add_custom_weights(weights)
+        if hasattr(self.classifier, "add_custom_weights"):
+            self.classifier.add_custom_weights(weights)
 
     def extract(self, x):
         raw_features, features = self.convnet(x)
         if self.extract_no_act:
             return raw_features
         return features
+
+    def predict_rotations(self, inputs):
+        if self.rotations_predictor is None:
+            raise ValueError("Enable the rotations predictor.")
+        return self.rotations_predictor(self.convnet(inputs, attention_hook=self.attention_hook)[1])
 
     def freeze(self, trainable=False, model="all"):
         if model == "all":
@@ -125,6 +147,9 @@ class BasicNet(nn.Module):
         else:
             assert False, model
 
+        if not isinstance(model, nn.Module):
+            return self
+
         for param in model.parameters():
             param.requires_grad = trainable
 
@@ -134,6 +159,17 @@ class BasicNet(nn.Module):
             model.train()
 
         return self
+
+    @property
+    def group_parameters(self):
+        groups = {"convnet": self.convnet.parameters()}
+
+        if isinstance(self.classifier, nn.Module):
+            groups["classifier"] = self.classifier.parameters()
+        if isinstance(self.post_processor, FactorScalar):
+            groups["postprocessing"] = self.post_processor.parameters()
+
+        return groups
 
     def copy(self):
         return copy.deepcopy(self)
@@ -285,8 +321,9 @@ class CosineClassifier(nn.Module):
         weights = torch.tensor(weights)
 
         if self.weights is not None:
-            placeholder = nn.Parameter(torch.zeros(
-                self.weights.shape[0] + weights.shape[0], self.features_dim))
+            placeholder = nn.Parameter(
+                torch.zeros(self.weights.shape[0] + weights.shape[0], self.features_dim)
+            )
             placeholder.data[:self.weights.shape[0]] = copy.deepcopy(self.weights.data)
             placeholder.data[self.weights.shape[0]:] = weights
 
@@ -298,8 +335,7 @@ class CosineClassifier(nn.Module):
 
     def add_classes(self, n_classes):
         new_weights = nn.Parameter(
-            torch.zeros(
-                self.proxy_per_class * (self.n_classes + n_classes), self.features_dim)
+            torch.zeros(self.proxy_per_class * (self.n_classes + n_classes), self.features_dim)
         )
         nn.init.kaiming_normal_(new_weights, nonlinearity="linear")
 
@@ -311,7 +347,9 @@ class CosineClassifier(nn.Module):
         self.weights = new_weights
 
         if self.use_bias:
-            new_bias = nn.Parameter(torch.zeros(self.proxy_per_class * (self.n_classes + n_classes)))
+            new_bias = nn.Parameter(
+                torch.zeros(self.proxy_per_class * (self.n_classes + n_classes))
+            )
             nn.init.constant_(new_bias, 0.1)
             if self.bias is not None:
                 new_bias.data[:self.n_classes *
@@ -352,9 +390,7 @@ class CosineClassifier(nn.Module):
                 std = torch.std(features_normalized, dim=0)
 
                 for _ in range(self.proxy_per_class):
-                    new_weights.append(
-                        torch.normal(class_embeddings, std) * avg_weights_norm
-                    )
+                    new_weights.append(torch.normal(class_embeddings, std) * avg_weights_norm)
 
         new_weights = torch.stack(new_weights)
         self.weights.data[-new_weights.shape[0]:] = new_weights.to(self.device)
@@ -462,7 +498,7 @@ class FactorScalar(nn.Module):
     def __init__(self, initial_value=1., **kwargs):
         super().__init__()
 
-        self.scale = nn.Parameter(torch.tensor(initial_value))
+        self.factor = nn.Parameter(torch.tensor(initial_value))
 
     def on_task_end(self):
         pass
@@ -471,7 +507,7 @@ class FactorScalar(nn.Module):
         pass
 
     def forward(self, inputs):
-        return self.scale * inputs
+        return self.factor * inputs
 
 
 class HeatedUpScalar(nn.Module):
@@ -507,6 +543,7 @@ class HeatedUpScalar(nn.Module):
 
     def forward(self, inputs):
         return self.factor * inputs
+
 
 # -------------
 # Recalibration

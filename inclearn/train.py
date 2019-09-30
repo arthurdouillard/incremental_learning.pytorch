@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import random
+import statistics
 import time
 
 import numpy as np
@@ -12,7 +13,10 @@ from inclearn.lib import factory, metrics, results_utils, utils
 
 
 def train(args):
-    _set_up_options(args)
+    autolabel = _set_up_options(args)
+    if args["autolabel"]:
+        args["label"] = autolabel
+        print("Auto label: {}.".format(autolabel))
 
     seed_list = copy.deepcopy(args["seed"])
     device = copy.deepcopy(args["device"])
@@ -21,23 +25,43 @@ def train(args):
 
     avg_inc_accs = []
 
-    for seed in seed_list:
+    orders = copy.deepcopy(args["order"])
+    del args["order"]
+    if orders is not None:
+        assert isinstance(orders, list) and len(orders)
+        assert all(isinstance(o, list) for o in orders)
+        assert all([isinstance(c, int) for o in orders for c in o])
+    else:
+        orders = [None for _ in range(len(seed_list))]
+
+    for i, seed in enumerate(seed_list):
         args["seed"] = seed
         args["device"] = device
 
         start_time = time.time()
-        avg_inc_accs.append(_train(args, start_date))
+
+        avg_inc_acc, last_acc, forgetting = _train(args, start_date, orders[i], i)
+        avg_inc_accs.append(avg_inc_acc)
         print("Training finished in {}s.".format(int(time.time() - start_time)))
+
+    print("Label was: {}".format(args["label"]))
+    print(
+        "Results done on {} seeds: avg: {}{}, last: {}, forgetting: {}".format(
+            len(seed_list), round(statistics.mean(avg_inc_accs) * 100, 2), " +/- " +
+            str(round(statistics.stdev(avg_inc_accs) * 100, 2)) if len(avg_inc_accs) > 1 else "",
+            round(last_acc * 100, 2), round(forgetting * 100, 2)
+        )
+    )
 
     return avg_inc_accs
 
 
-def _train(args, start_date):
+def _train(args, start_date, class_order, run_id):
     _set_seed(args["seed"])
 
     factory.set_device(args)
 
-    inc_dataset = factory.get_data(args)
+    inc_dataset = factory.get_data(args, class_order)
     args["classes_order"] = inc_dataset.class_order
 
     model = factory.get_model(args)
@@ -49,7 +73,9 @@ def _train(args, start_date):
     metric_logger = metrics.MetricLogger()
 
     if args["label"] is not None:
-        folder_results = os.path.join("results", "dev", args["model"], "{}_{}".format(start_date, args["label"]))
+        folder_results = os.path.join(
+            "results", "dev", args["model"], "{}_{}".format(start_date, args["label"])
+        )
         os.makedirs(folder_results, exist_ok=True)
         model.folder_result = folder_results
     else:
@@ -90,15 +116,17 @@ def _train(args, start_date):
     print(
         "Average Incremental Accuracy: {}.".format(results["results"][-1]["incremental_accuracy"])
     )
-
     if args["label"] is not None:
-        results_utils.save_results(results, args["label"], args["model"], start_date)
+        results_utils.save_results(results, args["label"], args["model"], start_date, run_id)
 
     del model
     del inc_dataset
-    #torch.cuda.empty_cache()
 
-    return results["results"][-1]["incremental_accuracy"]
+    avg_inc_acc = results["results"][-1]["incremental_accuracy"]
+    last_acc = results["results"][-1]["accuracy"]["total"]
+    forgetting = results["results"][-1]["forgetting"]
+
+    return avg_inc_acc, last_acc, forgetting
 
 
 def _set_seed(seed):
@@ -113,11 +141,16 @@ def _set_seed(seed):
 def _set_up_options(args):
     options_paths = args["options"] or []
 
+    autolabel = []
     for option_path in options_paths:
         if not os.path.exists(option_path):
             raise IOError("Not found options file {}.".format(option_path))
 
         args.update(_parse_options(option_path))
+
+        autolabel.append(os.path.splitext(os.path.basename(option_path))[0])
+
+    return "_".join(autolabel)
 
 
 def _parse_options(path):

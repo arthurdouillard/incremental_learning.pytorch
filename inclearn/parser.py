@@ -36,6 +36,8 @@ def get_parser():
                         help="Validation split (0. <= x < 1.).")
     parser.add_argument("-random", "--random-classes", action="store_true", default=False,
                         help="Randomize classes order of increment")
+    parser.add_argument("-order", "--order",
+                        help="List of classes ordering, to be given in options.")
     parser.add_argument("-max-task", "--max-task", default=None, type=int,
                         help="Cap the number of tasks.")
     parser.add_argument("-onehot", "--onehot", action="store_true",
@@ -65,6 +67,8 @@ def get_parser():
                         help="GPU index to use, for cpu use -1.")
     parser.add_argument("--label", type=str,
                         help="Experience name, if used a log will be created.")
+    parser.add_argument("--autolabel", action="store_true",
+                        help="Auto create label based on options files.")
     parser.add_argument("-seed", "--seed", default=[1], type=int, nargs="+",
                         help="Random seed.")
     parser.add_argument("-seed-range", "--seed-range", type=int, nargs=2,

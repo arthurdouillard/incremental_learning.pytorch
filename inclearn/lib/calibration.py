@@ -2,8 +2,7 @@ import torch
 from torch import nn, optim
 from torch.nn import functional as F
 
-from inclearn.lib.network import (CalibrationWrapper, LinearModel,
-                                  TemperatureScaling)
+from inclearn.lib.network import (CalibrationWrapper, LinearModel, TemperatureScaling)
 
 
 def calibrate(network, loader, device, indexes, calibration_type="linear"):
@@ -53,9 +52,9 @@ def _extract_data(network, loader, device):
     labels = []
 
     with torch.no_grad():
-        for inputs, targets, _ in loader:
-            logits.append(network(inputs.to(device)))
-            labels.append(targets.to(device))
+        for input_dict in loader:
+            logits.append(network(input_dict["inputs"].to(device)))
+            labels.append(input_dict["targets"].to(device))
 
         logits = torch.cat(logits).to(device)
         labels = torch.cat(labels).to(device)

@@ -2,7 +2,7 @@ import torch
 from torch import optim
 
 from inclearn import models
-from inclearn.convnet import densenet, my_resnet, resnet, ucir_resnet
+from inclearn.convnet import (densenet, my_resnet, my_resnet2, resnet, ucir_resnet)
 from inclearn.lib import data, samplers
 
 
@@ -24,6 +24,10 @@ def get_convnet(convnet_type, **kwargs):
         return resnet.resnet32(**kwargs)
     elif convnet_type == "rebuffi":
         return my_resnet.resnet_rebuffi(**kwargs)
+    elif convnet_type == "myresnet18":
+        return my_resnet2.resnet18(**kwargs)
+    elif convnet_type == "myresnet34":
+        return my_resnet2.resnet34(**kwargs)
     elif convnet_type == "densenet121":
         return densenet.densenet121(**kwargs)
     elif convnet_type == "ucir":
@@ -59,7 +63,7 @@ def get_model(args):
     raise NotImplementedError("Unknown model {}.".format(args["model"]))
 
 
-def get_data(args):
+def get_data(args, class_order=None):
     return data.IncrementalDataset(
         dataset_name=args["dataset"],
         random_order=args["random_classes"],
@@ -71,7 +75,9 @@ def get_data(args):
         increment=args["increment"],
         initial_increment=args["initial_increment"],
         sampler=get_sampler(args),
-        data_path=args["data_path"]
+        sampler_config=args.get("sampler_config", {}),
+        data_path=args["data_path"],
+        class_order=class_order
     )
 
 
@@ -94,5 +100,9 @@ def get_sampler(args):
 
     if sampler_type == "npair":
         return samplers.NPairSampler
+    elif sampler_type == "triplet":
+        return samplers.TripletSampler
+    elif sampler_type == "tripletsemihard":
+        return samplers.TripletSemiHardSampler
 
     raise ValueError("Unknown sampler {}.".format(sampler_type))

@@ -42,12 +42,16 @@ class IncrementalDataset:
         onehot=False,
         initial_increment=None,
         sampler=None,
-        data_path="data"
+        sampler_config=None,
+        data_path="data",
+        rotations=None,
+        class_order=None
     ):
         datasets = _get_datasets(dataset_name)
         self._setup_data(
             datasets,
             random_order=random_order,
+            class_order=class_order,
             seed=seed,
             increment=increment,
             validation_split=validation_split,
@@ -64,6 +68,8 @@ class IncrementalDataset:
         self._shuffle = shuffle
         self._onehot = onehot
         self._sampler = sampler
+        self._sampler_config = sampler_config
+        self._rotations = rotations
 
     @property
     def n_tasks(self):
@@ -206,14 +212,14 @@ class IncrementalDataset:
             raise NotImplementedError("Unknown mode {}.".format(mode))
 
         if self._sampler is not None and mode == "train":
-            sampler = self._sampler(y)
+            sampler = self._sampler(y, **self._sampler_config)
             batch_size = 1
         else:
             sampler = None
             batch_size = self._batch_size
 
         return DataLoader(
-            DummyDataset(x, y, memory_flags, trsf),
+            DummyDataset(x, y, memory_flags, trsf, rotations=self._rotations),
             batch_size=batch_size,
             shuffle=shuffle if sampler is None else False,
             num_workers=self._workers,
@@ -224,6 +230,7 @@ class IncrementalDataset:
         self,
         datasets,
         random_order=False,
+        class_order=None,
         seed=1,
         increment=10,
         validation_split=0.,
@@ -252,6 +259,8 @@ class IncrementalDataset:
             if random_order:
                 random.seed(seed)  # Ensure that following order is determined by seed:
                 random.shuffle(order)
+            elif class_order:
+                order = class_order
             elif dataset.class_order is not None:
                 order = dataset.class_order
 
@@ -330,10 +339,11 @@ class IncrementalDataset:
 
 class DummyDataset(torch.utils.data.Dataset):
 
-    def __init__(self, x, y, memory_flags, trsf):
+    def __init__(self, x, y, memory_flags, trsf, rotations=None):
         self.x, self.y = x, y
         self.memory_flags = memory_flags
         self.trsf = trsf
+        self.rotations = rotations
 
         assert x.shape[0] == y.shape[0] == memory_flags.shape[0]
 
@@ -345,9 +355,10 @@ class DummyDataset(torch.utils.data.Dataset):
         memory_flag = self.memory_flags[idx]
 
         x = Image.fromarray(x.astype("uint8"))
+
         x = self.trsf(x)
 
-        return x, y, memory_flag
+        return {"inputs": x, "targets": y, "memory_flags": memory_flag}
 
 
 def _get_datasets(dataset_names):
@@ -377,7 +388,6 @@ class iCIFAR10(DataHandler):
     train_transforms = [
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
-        #transforms.RandomRotation(10),
         transforms.ColorJitter(brightness=63 / 255)
     ]
     common_transforms = [

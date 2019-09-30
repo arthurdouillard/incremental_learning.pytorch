@@ -10,14 +10,20 @@ def get_template_results(args):
     return {"config": args, "results": []}
 
 
-def save_results(results, label, model, date):
+def save_results(results, label, model, date, run_id):
     del results["config"]["device"]
 
-    folder_path = os.path.join("results", "dev", model, "{}_{}".format(date, label))
+    year_month, day = date[:6], date[6:]
+    week_number = math.ceil(int(day) / 7)
+
+    folder_path = os.path.join(
+        "results", "dev", model, year_month, "week_{}".format(week_number),
+        "{}_{}".format(date, label)
+    )
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
-    file_path = "seed_{}_.json".format(results["config"]["seed"])
+    file_path = "run_{}_.json".format(run_id)
     with open(os.path.join(folder_path, file_path), "w+") as f:
         json.dump(results, f, indent=2)
 
@@ -178,7 +184,7 @@ def plot(results, increment, total, initial_increment=None, title="", path_to_sa
             print(label)
             raise
 
-    plt.legend(loc="upper right")#, bbox_to_anchor=(2., 1.0))
+    plt.legend(loc="upper right")  #, bbox_to_anchor=(2., 1.0))
     plt.xlabel("Number of classes")
     plt.ylabel("Accuracy over seen classes")
     plt.title(title)
