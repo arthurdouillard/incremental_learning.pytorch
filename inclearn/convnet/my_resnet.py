@@ -24,10 +24,24 @@ class DownsampleStride(nn.Module):
         return x[..., ::2, ::2]
 
 
+class DownsampleConv(nn.Module):
+
+    def __init__(self, inplanes, planes):
+        super().__init__()
+
+        self.conv = nn.Sequential(
+                nn.Conv2d(inplanes, planes, stride=2, kernel_size=1, bias=False),
+                nn.BatchNorm2d(planes),
+            )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
 class ResidualBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, increase_dim=False, last=False):
+    def __init__(self, inplanes, increase_dim=False, last=False, downsampling="stride"):
         super(ResidualBlock, self).__init__()
 
         self.increase_dim = increase_dim
@@ -48,9 +62,17 @@ class ResidualBlock(nn.Module):
         self.bn_b = nn.BatchNorm2d(planes)
 
         if increase_dim:
-            self.downsample = DownsampleStride()
-            self.pad = lambda x: torch.cat((x, x.mul(0)), 1)
+            if downsampling == "stride":
+                self.downsampler = DownsampleStride()
+                self.downsample = lambda x: self.pad(self.downsampler(x))
+            else:
+                self.downsample = DownsampleConv(inplanes, planes)
+
         self.last = last
+
+    @staticmethod
+    def pad(x):
+        return torch.cat((x, x.mul(0)), 1)
 
     def forward(self, x):
         y = self.conv_a(x)
@@ -62,7 +84,6 @@ class ResidualBlock(nn.Module):
 
         if self.increase_dim:
             x = self.downsample(x)
-            x = self.pad(x)
 
         y = x + y
 
@@ -124,10 +145,12 @@ class CifarResNet(nn.Module):
     def __init__(
         self,
         n=5,
+        nf=16,
         channels=3,
         preact=False,
         zero_residual=True,
         pooling_config={"type": "avg"},
+        downsampling="stride",
         **kwargs
     ):
         """ Constructor
@@ -139,18 +162,20 @@ class CifarResNet(nn.Module):
         if kwargs:
             raise ValueError("Unused kwargs: {}.".format(kwargs))
 
+        print("Downsampling type", downsampling)
+        self._downsampling_type = downsampling
+
         Block = ResidualBlock if not preact else PreActResidualBlock
 
         super(CifarResNet, self).__init__()
 
-        self.conv_1_3x3 = nn.Conv2d(channels, 16, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn_1 = nn.BatchNorm2d(16)
+        self.conv_1_3x3 = nn.Conv2d(channels, nf, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn_1 = nn.BatchNorm2d(nf)
 
-        self.inplanes = 16
-        self.stage_1 = self._make_layer(Block, 16, increase_dim=False, n=n)
-        self.stage_2 = self._make_layer(Block, 16, increase_dim=True, n=n - 1)
-        self.stage_3 = self._make_layer(Block, 32, increase_dim=True, n=n - 2)
-        self.stage_4 = Block(64, increase_dim=False, last=True)
+        self.stage_1 = self._make_layer(Block, nf, increase_dim=False, n=n)
+        self.stage_2 = self._make_layer(Block, nf, increase_dim=True, n=n - 1)
+        self.stage_3 = self._make_layer(Block, 2 * nf, increase_dim=True, n=n - 2)
+        self.stage_4 = Block(4 * nf, increase_dim=False, last=True, downsampling=self._downsampling_type)
 
         if pooling_config["type"] == "avg":
             self.pool = nn.AvgPool2d(8)
@@ -159,7 +184,7 @@ class CifarResNet(nn.Module):
         else:
             raise ValueError("Unknown pooling type {}.".format(pooling_config["type"]))
 
-        self.out_dim = 64
+        self.out_dim = 4 * nf
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -177,11 +202,11 @@ class CifarResNet(nn.Module):
         layers = []
 
         if increase_dim:
-            layers.append(Block(planes, increase_dim=True))
+            layers.append(Block(planes, increase_dim=True, downsampling=self._downsampling_type))
             planes = 2 * planes
 
         for i in range(n):
-            layers.append(Block(planes))
+            layers.append(Block(planes, downsampling=self._downsampling_type))
 
         return nn.Sequential(*layers)
 

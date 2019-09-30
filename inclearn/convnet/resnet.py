@@ -107,11 +107,8 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, zero_init_residual=False, nf=64, **kwargs):
+    def __init__(self, block, layers, zero_init_residual=True, nf=16, **kwargs):
         super(ResNet, self).__init__()
-
-        nf = 16
-        zero_init_residual = True
 
         self.inplanes = nf
         self.conv1 = nn.Conv2d(3, nf, kernel_size=3, stride=1, padding=1,
@@ -159,7 +156,7 @@ class ResNet(nn.Module):
 
         for i in range(1, blocks):
             if i == blocks - 1 and last:
-                layers.append(block(self.inplanes, planes, last_relu=True))
+                layers.append(block(self.inplanes, planes, last_relu=False))
             else:
                 layers.append(block(self.inplanes, planes))
 
@@ -171,14 +168,16 @@ class ResNet(nn.Module):
         x = self.relu(x)
         x = self.maxpool(x)
 
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x_1 = self.layer1(x)
+        x_2 = self.layer2(x_1)
+        x_3 = self.layer3(x_2)
+        x_4 = self.layer4(x_3)
 
-        raw_features = self.end_features(x)
-        features = self.end_features(F.relu(x, inplace=False))
+        raw_features = self.end_features(x_4)
+        features = self.end_features(F.relu(x_4, inplace=False))
 
+        if attention_hook:
+            return raw_features, features, [x_1, x_2, x_3, x_4]
         return raw_features, features
 
     def end_features(self, x):
