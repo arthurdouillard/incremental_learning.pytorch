@@ -111,7 +111,8 @@ def add_new_weights(network, weight_generation, current_nb_classes, task_size, i
         print("Generating imprinted weights")
 
         network.add_imprinted_classes(
-            list(range(current_nb_classes, current_nb_classes + task_size)), inc_dataset
+            list(range(current_nb_classes, current_nb_classes + task_size)), inc_dataset,
+            **weight_generation
         )
     elif weight_generation["type"] == "embedding":
         print("Generating embedding weights")
@@ -167,20 +168,21 @@ def apply_kmeans(features, targets, nb_clusters, pre_normalization):
     return np.concatenate(new_features), np.concatenate(new_targets)
 
 
-def apply_knn(features, targets, features_test, targets_test, nb_neighbors, pre_normalize):
+def apply_knn(features, targets, features_test, targets_test, nb_neighbors, normalize=True,
+              weights="uniform"):
     print(
-        "KNN with {} neighbors and pre-normalized features: {}.".format(
-            nb_neighbors, pre_normalize
+        "KNN with {} neighbors and pre-normalized features: {}, weights: {}.".format(
+            nb_neighbors, normalize, weights
         )
     )
 
-    if pre_normalize:
+    if normalize:
         features = features / np.linalg.norm(features, axis=-1).reshape(-1, 1)
 
-    knn = KNeighborsClassifier(n_neighbors=nb_neighbors, n_jobs=10)
+    knn = KNeighborsClassifier(n_neighbors=nb_neighbors, n_jobs=10, weights=weights)
     knn.fit(features, targets)
 
-    if pre_normalize:
+    if normalize:
         features_test = features_test / np.linalg.norm(features_test, axis=-1).reshape(-1, 1)
 
     pred_targets = knn.predict(features_test)

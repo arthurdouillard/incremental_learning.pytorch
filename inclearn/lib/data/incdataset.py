@@ -3,10 +3,11 @@ import random
 import numpy as np
 import torch
 from PIL import Image
+from skimage import io
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import transforms
 
-from inclearn.lib import utils
+from .datasets import ImageNet100, ImageNet1000, iCIFAR10, iCIFAR100
 
 
 class IncrementalDataset:
@@ -45,7 +46,7 @@ class IncrementalDataset:
         sampler_config=None,
         data_path="data",
         rotations=None,
-        class_order=None
+        class_order=None,
     ):
         datasets = _get_datasets(dataset_name)
         self._setup_data(
@@ -59,10 +60,14 @@ class IncrementalDataset:
             data_path=data_path
         )
         self.train_transforms = datasets[0].train_transforms  # FIXME handle multiple datasets
+        self.test_transforms = datasets[0].test_transforms
         self.common_transforms = datasets[0].common_transforms
+
+        self.open_image = datasets[0].open_image
 
         self._current_task = 0
 
+        self._seed = seed
         self._batch_size = batch_size
         self._workers = workers
         self._shuffle = shuffle
@@ -203,10 +208,13 @@ class IncrementalDataset:
         if mode == "train":
             trsf = transforms.Compose([*self.train_transforms, *self.common_transforms])
         elif mode == "test":
-            trsf = transforms.Compose(self.common_transforms)
+            trsf = transforms.Compose([*self.test_transforms, *self.common_transforms])
         elif mode == "flip":
             trsf = transforms.Compose(
-                [transforms.RandomHorizontalFlip(p=1.), *self.common_transforms]
+                [
+                    transforms.RandomHorizontalFlip(p=1.), *self.test_transforms,
+                    *self.common_transforms
+                ]
             )
         else:
             raise NotImplementedError("Unknown mode {}.".format(mode))
@@ -219,7 +227,7 @@ class IncrementalDataset:
             batch_size = self._batch_size
 
         return DataLoader(
-            DummyDataset(x, y, memory_flags, trsf, rotations=self._rotations),
+            DummyDataset(x, y, memory_flags, trsf, open_image=self.open_image),
             batch_size=batch_size,
             shuffle=shuffle if sampler is None else False,
             num_workers=self._workers,
@@ -246,8 +254,8 @@ class IncrementalDataset:
 
         current_class_idx = 0  # When using multiple datasets
         for dataset in datasets:
-            train_dataset = dataset.base_dataset(data_path, train=True, download=True)
-            test_dataset = dataset.base_dataset(data_path, train=False, download=True)
+            train_dataset = dataset().base_dataset(data_path, train=True, download=True)
+            test_dataset = dataset().base_dataset(data_path, train=False, download=True)
 
             x_train, y_train = train_dataset.data, np.array(train_dataset.targets)
             x_val, y_val, x_train, y_train = self._split_per_class(
@@ -339,11 +347,11 @@ class IncrementalDataset:
 
 class DummyDataset(torch.utils.data.Dataset):
 
-    def __init__(self, x, y, memory_flags, trsf, rotations=None):
+    def __init__(self, x, y, memory_flags, trsf, open_image=False):
         self.x, self.y = x, y
         self.memory_flags = memory_flags
         self.trsf = trsf
-        self.rotations = rotations
+        self.open_image = open_image
 
         assert x.shape[0] == y.shape[0] == memory_flags.shape[0]
 
@@ -354,11 +362,14 @@ class DummyDataset(torch.utils.data.Dataset):
         x, y = self.x[idx], self.y[idx]
         memory_flag = self.memory_flags[idx]
 
-        x = Image.fromarray(x.astype("uint8"))
+        if self.open_image:
+            img = Image.open(x).convert("RGB")
+        else:
+            img = Image.fromarray(x.astype("uint8"))
 
-        x = self.trsf(x)
+        img = self.trsf(img)
 
-        return {"inputs": x, "targets": y, "memory_flags": memory_flag}
+        return {"inputs": img, "targets": y, "memory_flags": memory_flag}
 
 
 def _get_datasets(dataset_names):
@@ -372,64 +383,9 @@ def _get_dataset(dataset_name):
         return iCIFAR10
     elif dataset_name == "cifar100":
         return iCIFAR100
+    elif dataset_name == "imagenet100":
+        return ImageNet100
+    elif dataset_name == "imagenet1000":
+        return ImageNet1000
     else:
         raise NotImplementedError("Unknown dataset {}.".format(dataset_name))
-
-
-class DataHandler:
-    base_dataset = None
-    train_transforms = []
-    common_transforms = [transforms.ToTensor()]
-    class_order = None
-
-
-class iCIFAR10(DataHandler):
-    base_dataset = datasets.cifar.CIFAR10
-    train_transforms = [
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=63 / 255)
-    ]
-    common_transforms = [
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ]
-
-
-class iCIFAR100(iCIFAR10):
-    base_dataset = datasets.cifar.CIFAR100
-    common_transforms = [
-        transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-    ]
-    class_order = [  # Taken from original iCaRL implementation:
-        87, 0, 52, 58, 44, 91, 68, 97, 51, 15, 94, 92, 10, 72, 49, 78, 61, 14, 8, 86, 84, 96, 18,
-        24, 32, 45, 88, 11, 4, 67, 69, 66, 77, 47, 79, 93, 29, 50, 57, 83, 17, 81, 41, 12, 37, 59,
-        25, 20, 80, 73, 1, 28, 6, 46, 62, 82, 53, 9, 31, 75, 38, 63, 33, 74, 27, 22, 36, 3, 16, 21,
-        60, 19, 70, 90, 89, 43, 5, 42, 65, 76, 40, 30, 23, 85, 2, 95, 56, 48, 71, 64, 98, 13, 99, 7,
-        34, 55, 54, 26, 35, 39
-    ]
-
-
-class iMNIST(DataHandler):
-    base_dataset = datasets.MNIST
-    train_transforms = [transforms.RandomCrop(28, padding=4), transforms.RandomHorizontalFlip()]
-    common_transforms = [transforms.ToTensor()]
-
-
-class iPermutedMNIST(iMNIST):
-
-    def _preprocess_initial_data(self, data):
-        b, w, h, c = data.shape
-        data = data.reshape(b, -1, c)
-
-        permutation = np.random.permutation(w * h)
-
-        data = data[:, permutation, :]
-
-        return data.reshape(b, w, h, c)
-
-
-# --------------
-# Data utilities
-# --------------

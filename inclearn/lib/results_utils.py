@@ -10,9 +10,7 @@ def get_template_results(args):
     return {"config": args, "results": []}
 
 
-def save_results(results, label, model, date, run_id):
-    del results["config"]["device"]
-
+def get_save_folder(model, date, label):
     year_month, day = date[:6], date[6:]
     week_number = math.ceil(int(day) / 7)
 
@@ -23,7 +21,16 @@ def save_results(results, label, model, date, run_id):
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
+    return folder_path
+
+
+def save_results(results, label, model, date, run_id):
+    del results["config"]["device"]
+
+    folder_path = get_save_folder(model, date, label)
+
     file_path = "run_{}_.json".format(run_id)
+
     with open(os.path.join(folder_path, file_path), "w+") as f:
         json.dump(results, f, indent=2)
 

@@ -12,9 +12,8 @@ class MetricLogger:
         self.metrics["accuracy"].append(
             accuracy(ypred, ytrue, task_size=10)
         )  # FIXME various task size
-        self.metrics["incremental_accuracy"].append(
-            incremental_accuracy(self.metrics["accuracy"])
-        )
+        self.metrics["accuracy_per_class"].append(accuracy(ypred, ytrue, task_size=1))
+        self.metrics["incremental_accuracy"].append(incremental_accuracy(self.metrics["accuracy"]))
         self.metrics["forgetting"].append(forgetting(self.metrics["accuracy"]))
 
     @property
@@ -22,7 +21,8 @@ class MetricLogger:
         return {
             "accuracy": self.metrics["accuracy"][-1],
             "incremental_accuracy": self.metrics["incremental_accuracy"][-1],
-            "forgetting": self.metrics["forgetting"][-1]
+            "forgetting": self.metrics["forgetting"][-1],
+            "accuracy_per_class": self.metrics["accuracy_per_class"][-1]
         }
 
 

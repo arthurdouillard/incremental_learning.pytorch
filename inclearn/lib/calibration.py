@@ -1,5 +1,5 @@
 import torch
-from torch import nn, optim
+from torch import optim
 from torch.nn import functional as F
 
 from inclearn.lib.network import (CalibrationWrapper, LinearModel, TemperatureScaling)

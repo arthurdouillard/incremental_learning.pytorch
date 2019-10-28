@@ -24,9 +24,11 @@ class MultiSampler(BatchSampler):
         pass
 
 
-class TripletSemiHardSampler(BatchSampler):
-    """Samples positives pair that will be then be mixed in triplets with a
-    "semi-hard sampling".
+class TripletCKSampler(BatchSampler):
+    """Samples positives pair that will be then be mixed in triplets.
+
+    C = number of classes
+    K = number of instances per class
 
     References:
         * Facenet: A unified embedding for face recognition and clustering
@@ -34,8 +36,8 @@ class TripletSemiHardSampler(BatchSampler):
           CVPR 2015.
     """
 
-    def __init__(self, y, nb_per_class=2, nb_classes=20):
-        assert len(np.unique(y)) > nb_classes
+    def __init__(self, y, nb_per_class=4, nb_classes=20):
+        assert len(np.unique(y)) >= nb_classes
 
         self.y = y
         self.nb_per_class = nb_per_class
@@ -78,7 +80,8 @@ class TripletSampler(BatchSampler):
 
     def __init__(self, y, batch_size=128):
         self.y = y
-        self.batch_size = batch_size // 3
+        self.batch_size = (batch_size // 3)
+        print("Triplet Sampler has a batch size of {}.".format(3 * self.batch_size))
 
         self._classes = set(np.unique(y).tolist())
         self._class_to_indexes = {
