@@ -1,13 +1,88 @@
-"""Pytorch port of the resnet used for CIFAR100 by iCaRL.
+''' Incremental-Classifier Learning
+ Authors : Khurram Javed, Muhammad Talha Paracha
+ Maintainer : Khurram Javed
+ Lab : TUKL-SEECS R&D Lab
+ Email : 14besekjaved@seecs.edu.pk '''
 
-https://github.com/srebuffi/iCaRL/blob/master/iCaRL-TheanoLasagne/utils_cifar100.py
-"""
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
 
 from inclearn.lib import pooling
+
+
+class BatchRenormalization2D(nn.Module):
+
+    def __init__(self, num_features, eps=1e-05, momentum=0.01, r_d_max_inc_step=0.0001):
+        super(BatchRenormalization2D, self).__init__()
+
+        self.eps = eps
+        self.momentum = torch.tensor((momentum), requires_grad=False)
+
+        self.gamma = torch.nn.Parameter(torch.ones((1, num_features, 1, 1)), requires_grad=True)
+        self.beta = torch.nn.Parameter(torch.zeros((1, num_features, 1, 1)), requires_grad=True)
+
+        self.running_avg_mean = torch.ones((1, num_features, 1, 1), requires_grad=False)
+        self.running_avg_std = torch.zeros((1, num_features, 1, 1), requires_grad=False)
+
+        self.max_r_max = 3.0
+        self.max_d_max = 5.0
+
+        self.r_max_inc_step = r_d_max_inc_step
+        self.d_max_inc_step = r_d_max_inc_step
+
+        self.r_max = torch.tensor((1.0), requires_grad=False)
+        self.d_max = torch.tensor((0.0), requires_grad=False)
+
+    def forward(self, x):
+
+        device = self.gamma.device
+
+        batch_ch_mean = torch.mean(x, dim=(0, 2, 3), keepdim=True).to(device)
+        batch_ch_std = torch.clamp(torch.std(x, dim=(0, 2, 3), keepdim=True), self.eps,
+                                   1e10).to(device)
+
+        self.running_avg_std = self.running_avg_std.to(device)
+        self.running_avg_mean = self.running_avg_mean.to(device)
+        self.momentum = self.momentum.to(device)
+
+        self.r_max = self.r_max.to(device)
+        self.d_max = self.d_max.to(device)
+
+        if self.training:
+
+            r = torch.clamp(batch_ch_std / self.running_avg_std, 1.0 / self.r_max,
+                            self.r_max).to(device).data.to(device)
+            d = torch.clamp(
+                (batch_ch_mean - self.running_avg_mean) / self.running_avg_std, -self.d_max,
+                self.d_max
+            ).to(device).data.to(device)
+
+            x = ((x - batch_ch_mean) * r) / batch_ch_std + d
+            x = self.gamma * x + self.beta
+
+            if self.r_max < self.max_r_max:
+                self.r_max += self.r_max_inc_step * x.shape[0]
+
+            if self.d_max < self.max_d_max:
+                self.d_max += self.d_max_inc_step * x.shape[0]
+
+        else:
+
+            x = (x - self.running_avg_mean) / self.running_avg_std
+            x = self.gamma * x + self.beta
+
+        self.running_avg_mean = self.running_avg_mean + self.momentum * (
+            batch_ch_mean.data.to(device) - self.running_avg_mean
+        )
+        self.running_avg_std = self.running_avg_std + self.momentum * (
+            batch_ch_std.data.to(device) - self.running_avg_std
+        )
+
+        return x
 
 
 class DownsampleStride(nn.Module):
@@ -27,7 +102,7 @@ class DownsampleConv(nn.Module):
 
         self.conv = nn.Sequential(
             nn.Conv2d(inplanes, planes, stride=2, kernel_size=1, bias=False),
-            nn.BatchNorm2d(planes),
+            BatchRenormalization2D(planes),
         )
 
     def forward(self, x):
@@ -37,7 +112,7 @@ class DownsampleConv(nn.Module):
 class ResidualBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, increase_dim=False, last_relu=False, downsampling="stride"):
+    def __init__(self, inplanes, increase_dim=False, last=False, downsampling="stride"):
         super(ResidualBlock, self).__init__()
 
         self.increase_dim = increase_dim
@@ -52,10 +127,10 @@ class ResidualBlock(nn.Module):
         self.conv_a = nn.Conv2d(
             inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
         )
-        self.bn_a = nn.BatchNorm2d(planes)
+        self.bn_a = BatchRenormalization2D(planes)
 
         self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn_b = nn.BatchNorm2d(planes)
+        self.bn_b = BatchRenormalization2D(planes)
 
         if increase_dim:
             if downsampling == "stride":
@@ -64,7 +139,7 @@ class ResidualBlock(nn.Module):
             else:
                 self.downsample = DownsampleConv(inplanes, planes)
 
-        self.last_relu = last_relu
+        self.last = last
 
     @staticmethod
     def pad(x):
@@ -83,16 +158,13 @@ class ResidualBlock(nn.Module):
 
         y = x + y
 
-        if self.last_relu:
-            y = F.relu(y, inplace=True)
-
         return y
 
 
 class PreActResidualBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, increase_dim=False, last_relu=False):
+    def __init__(self, inplanes, increase_dim=False, last=False):
         super().__init__()
 
         self.increase_dim = increase_dim
@@ -104,18 +176,18 @@ class PreActResidualBlock(nn.Module):
             first_stride = 1
             planes = inplanes
 
-        self.bn_a = nn.BatchNorm2d(inplanes)
+        self.bn_a = BatchRenormalization2D(inplanes)
         self.conv_a = nn.Conv2d(
             inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
         )
 
-        self.bn_b = nn.BatchNorm2d(planes)
+        self.bn_b = BatchRenormalization2D(planes)
         self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
 
         if increase_dim:
             self.downsample = DownsampleStride()
             self.pad = lambda x: torch.cat((x, x.mul(0)), 1)
-        self.last_relu = last_relu
+        self.last = last
 
     def forward(self, x):
         y = self.bn_a(x)
@@ -132,31 +204,7 @@ class PreActResidualBlock(nn.Module):
 
         y = x + y
 
-        if self.last_relu:
-            y = F.relu(y, inplace=True)
-
         return y
-
-
-class Stage(nn.Module):
-
-    def __init__(self, blocks, block_relu=False):
-        super().__init__()
-
-        self.blocks = nn.ModuleList(blocks)
-        self.block_relu = block_relu
-
-    def forward(self, x):
-        intermediary_features = []
-
-        for b in self.blocks:
-            x = b(x)
-            intermediary_features.append(x)
-
-            if self.block_relu:
-                x = F.relu(x)
-
-        return intermediary_features, x
 
 
 class CifarResNet(nn.Module):
@@ -175,8 +223,6 @@ class CifarResNet(nn.Module):
         pooling_config={"type": "avg"},
         downsampling="stride",
         final_layer=False,
-        all_attentions=False,
-        last_relu=False,
         **kwargs
     ):
         """ Constructor
@@ -188,23 +234,21 @@ class CifarResNet(nn.Module):
         if kwargs:
             raise ValueError("Unused kwargs: {}.".format(kwargs))
 
-        self.all_attentions = all_attentions
         print("Downsampling type", downsampling)
         self._downsampling_type = downsampling
-        self.last_relu = last_relu
 
         Block = ResidualBlock if not preact else PreActResidualBlock
 
         super(CifarResNet, self).__init__()
 
         self.conv_1_3x3 = nn.Conv2d(channels, nf, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn_1 = nn.BatchNorm2d(nf)
+        self.bn_1 = BatchRenormalization2D(nf)
 
         self.stage_1 = self._make_layer(Block, nf, increase_dim=False, n=n)
         self.stage_2 = self._make_layer(Block, nf, increase_dim=True, n=n - 1)
         self.stage_3 = self._make_layer(Block, 2 * nf, increase_dim=True, n=n - 2)
         self.stage_4 = Block(
-            4 * nf, increase_dim=False, last_relu=False, downsampling=self._downsampling_type
+            4 * nf, increase_dim=False, last=True, downsampling=self._downsampling_type
         )
 
         if pooling_config["type"] == "avg":
@@ -231,55 +275,36 @@ class CifarResNet(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, BatchRenormalization2D):
+                nn.init.constant_(m.gamma, 1)
+                nn.init.constant_(m.beta, 0)
 
-        if zero_residual:
-            for m in self.modules():
-                if isinstance(m, ResidualBlock):
-                    nn.init.constant_(m.bn_b.weight, 0)
-
-    def _make_layer(self, Block, planes, increase_dim=False, n=None):
+    def _make_layer(self, Block, planes, increase_dim=False, last=False, n=None):
         layers = []
 
         if increase_dim:
-            layers.append(
-                Block(
-                    planes,
-                    increase_dim=True,
-                    last_relu=False,
-                    downsampling=self._downsampling_type
-                )
-            )
+            layers.append(Block(planes, increase_dim=True, downsampling=self._downsampling_type))
             planes = 2 * planes
 
         for i in range(n):
-            layers.append(
-                Block(planes, last_relu=False, downsampling=self._downsampling_type)
-            )
+            layers.append(Block(planes, downsampling=self._downsampling_type))
 
-        return Stage(layers, block_relu=self.last_relu)
+        return nn.Sequential(*layers)
 
     def forward(self, x, attention_hook=False):
         x = self.conv_1_3x3(x)
         x = F.relu(self.bn_1(x), inplace=True)
 
-        feats_s1, x = self.stage_1(x)
-        feats_s2, x = self.stage_2(x)
-        feats_s3, x = self.stage_3(x)
-        x = self.stage_4(x)
+        x_s1 = self.stage_1(x)
+        x_s2 = self.stage_2(x_s1)
+        x_s3 = self.stage_3(x_s2)
+        x_s4 = self.stage_4(x_s3)
 
-        raw_features = self.end_features(x)
-        features = self.end_features(F.relu(x, inplace=False))
-
-        if self.all_attentions:
-            attentions = [*feats_s1, *feats_s2, *feats_s3, x]
-        else:
-            attentions = [feats_s1[-1], feats_s2[-1], feats_s3[-1], x]
+        raw_features = self.end_features(x_s4)
+        features = self.end_features(F.relu(x_s4, inplace=False))
 
         if attention_hook:
-            return raw_features, features, attentions
+            return raw_features, features, [x_s1, x_s2, x_s3, x_s4]
         return raw_features, features
 
     def end_features(self, x):

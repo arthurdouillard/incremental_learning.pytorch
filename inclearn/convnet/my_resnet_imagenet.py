@@ -37,7 +37,7 @@ class DownsampleConv(nn.Module):
 class ResidualBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, increase_dim=False, last_relu=False, downsampling="stride"):
+    def __init__(self, inplanes, increase_dim=False, last=False, downsampling="stride"):
         super(ResidualBlock, self).__init__()
 
         self.increase_dim = increase_dim
@@ -64,7 +64,7 @@ class ResidualBlock(nn.Module):
             else:
                 self.downsample = DownsampleConv(inplanes, planes)
 
-        self.last_relu = last_relu
+        self.last = last
 
     @staticmethod
     def pad(x):
@@ -83,16 +83,13 @@ class ResidualBlock(nn.Module):
 
         y = x + y
 
-        if self.last_relu:
-            y = F.relu(y, inplace=True)
-
         return y
 
 
 class PreActResidualBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, increase_dim=False, last_relu=False):
+    def __init__(self, inplanes, increase_dim=False, last=False):
         super().__init__()
 
         self.increase_dim = increase_dim
@@ -115,7 +112,7 @@ class PreActResidualBlock(nn.Module):
         if increase_dim:
             self.downsample = DownsampleStride()
             self.pad = lambda x: torch.cat((x, x.mul(0)), 1)
-        self.last_relu = last_relu
+        self.last = last
 
     def forward(self, x):
         y = self.bn_a(x)
@@ -132,31 +129,7 @@ class PreActResidualBlock(nn.Module):
 
         y = x + y
 
-        if self.last_relu:
-            y = F.relu(y, inplace=True)
-
         return y
-
-
-class Stage(nn.Module):
-
-    def __init__(self, blocks, block_relu=False):
-        super().__init__()
-
-        self.blocks = nn.ModuleList(blocks)
-        self.block_relu = block_relu
-
-    def forward(self, x):
-        intermediary_features = []
-
-        for b in self.blocks:
-            x = b(x)
-            intermediary_features.append(x)
-
-            if self.block_relu:
-                x = F.relu(x)
-
-        return intermediary_features, x
 
 
 class CifarResNet(nn.Module):
@@ -175,8 +148,6 @@ class CifarResNet(nn.Module):
         pooling_config={"type": "avg"},
         downsampling="stride",
         final_layer=False,
-        all_attentions=False,
-        last_relu=False,
         **kwargs
     ):
         """ Constructor
@@ -188,10 +159,8 @@ class CifarResNet(nn.Module):
         if kwargs:
             raise ValueError("Unused kwargs: {}.".format(kwargs))
 
-        self.all_attentions = all_attentions
         print("Downsampling type", downsampling)
         self._downsampling_type = downsampling
-        self.last_relu = last_relu
 
         Block = ResidualBlock if not preact else PreActResidualBlock
 
@@ -204,7 +173,7 @@ class CifarResNet(nn.Module):
         self.stage_2 = self._make_layer(Block, nf, increase_dim=True, n=n - 1)
         self.stage_3 = self._make_layer(Block, 2 * nf, increase_dim=True, n=n - 2)
         self.stage_4 = Block(
-            4 * nf, increase_dim=False, last_relu=False, downsampling=self._downsampling_type
+            4 * nf, increase_dim=False, last=True, downsampling=self._downsampling_type
         )
 
         if pooling_config["type"] == "avg":
@@ -240,46 +209,32 @@ class CifarResNet(nn.Module):
                 if isinstance(m, ResidualBlock):
                     nn.init.constant_(m.bn_b.weight, 0)
 
-    def _make_layer(self, Block, planes, increase_dim=False, n=None):
+    def _make_layer(self, Block, planes, increase_dim=False, last=False, n=None):
         layers = []
 
         if increase_dim:
-            layers.append(
-                Block(
-                    planes,
-                    increase_dim=True,
-                    last_relu=False,
-                    downsampling=self._downsampling_type
-                )
-            )
+            layers.append(Block(planes, increase_dim=True, downsampling=self._downsampling_type))
             planes = 2 * planes
 
         for i in range(n):
-            layers.append(
-                Block(planes, last_relu=False, downsampling=self._downsampling_type)
-            )
+            layers.append(Block(planes, downsampling=self._downsampling_type))
 
-        return Stage(layers, block_relu=self.last_relu)
+        return nn.Sequential(*layers)
 
     def forward(self, x, attention_hook=False):
         x = self.conv_1_3x3(x)
         x = F.relu(self.bn_1(x), inplace=True)
 
-        feats_s1, x = self.stage_1(x)
-        feats_s2, x = self.stage_2(x)
-        feats_s3, x = self.stage_3(x)
-        x = self.stage_4(x)
+        x_s1 = self.stage_1(x)
+        x_s2 = self.stage_2(x_s1)
+        x_s3 = self.stage_3(x_s2)
+        x_s4 = self.stage_4(x_s3)
 
-        raw_features = self.end_features(x)
-        features = self.end_features(F.relu(x, inplace=False))
-
-        if self.all_attentions:
-            attentions = [*feats_s1, *feats_s2, *feats_s3, x]
-        else:
-            attentions = [feats_s1[-1], feats_s2[-1], feats_s3[-1], x]
+        raw_features = self.end_features(x_s4)
+        features = self.end_features(F.relu(x_s4, inplace=False))
 
         if attention_hook:
-            return raw_features, features, attentions
+            return raw_features, features, [x_s1, x_s2, x_s3, x_s4]
         return raw_features, features
 
     def end_features(self, x):

@@ -5,9 +5,7 @@ import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 from torch.nn import functional as F
 
-__all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
-           'resnet152']
-
+__all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152']
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
@@ -20,8 +18,7 @@ model_urls = {
 
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                     padding=1, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
 
 def conv1x1(in_planes, out_planes, stride=1):
@@ -107,12 +104,12 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, zero_init_residual=True, nf=16, **kwargs):
+    def __init__(self, block, layers, zero_init_residual=True, nf=16, block_relu=False, **kwargs):
         super(ResNet, self).__init__()
 
+        self.block_relu = block_relu
         self.inplanes = nf
-        self.conv1 = nn.Conv2d(3, nf, kernel_size=3, stride=1, padding=1,
-                               bias=False)
+        self.conv1 = nn.Conv2d(3, nf, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(nf)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -120,7 +117,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 2 * nf, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 4 * nf, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 8 * nf, layers[3], stride=2, last=True)
-        self.avgpool = nn.AvgPool2d(2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         self.out_dim = 8 * nf * block.expansion
         print("Features dimension is {}.".format(self.out_dim))
@@ -158,7 +155,7 @@ class ResNet(nn.Module):
             if i == blocks - 1 and last:
                 layers.append(block(self.inplanes, planes, last_relu=False))
             else:
-                layers.append(block(self.inplanes, planes))
+                layers.append(block(self.inplanes, planes, last_relu=self.block_relu))
 
         return nn.Sequential(*layers)
 
