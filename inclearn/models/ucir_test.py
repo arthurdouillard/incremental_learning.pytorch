@@ -1,11 +1,15 @@
+import copy
+import logging
 import math
 
 import numpy as np
 import torch
 from torch.nn import functional as F
 
-from inclearn.lib import factory, losses, network, schedulers, utils
+from inclearn.lib import data, factory, losses, network, utils
 from inclearn.models.icarl import ICarl
+
+logger = logging.getLogger(__name__)
 
 
 class UCIRTest(ICarl):
@@ -17,14 +21,21 @@ class UCIRTest(ICarl):
     def __init__(self, args):
         self._disable_progressbar = args.get("no_progressbar", False)
 
-        self._device = args["device"]
+        self._device = args["device"][0]
+        self._old_device = args["device"][-1]
+
         self._opt_name = args["optimizer"]
         self._lr = args["lr"]
         self._weight_decay = args["weight_decay"]
         self._n_epochs = args["epochs"]
-
         self._scheduling = args["scheduling"]
         self._lr_decay = args["lr_decay"]
+
+        if "optimizer_config" in args:
+            logger.warning("Overring optimizer related params.")
+            self._opt_name = args["optimizer_config"]["type"]
+            self._lr = args["optimizer_config"]["lr"]
+            self._lr_decay = args["optimizer_config"]["lr_decay"]
 
         self._memory_size = args["memory_size"]
         self._fixed_memory = args["fixed_memory"]
@@ -32,22 +43,25 @@ class UCIRTest(ICarl):
         self._n_classes = 0
 
         self._use_mimic_score = args.get("mimic_score", False)
-        self._use_less_forget = args.get("less_forget", False)
+        self._less_forget_config = args.get("less_forget", {})
+        assert isinstance(self._less_forget_config, dict)
+
         self._lambda_schedule = args.get("lambda_schedule", False)
         self._ranking_loss = args.get("ranking_loss", {})
 
-        self._use_relative_teachers = args.get("relative_teachers", False)
-        self._relative_teachers_old = args.get("relative_teacher_on_memory", False)
+        self._relative_teachers_config = args.get("relative_teachers", {})
 
         self._gor_config = args.get("gor_config", {})
 
-        self._use_ams_ce = args.get("adaptative_margin_softmax", False)
+        self._ams_config = args.get("adaptative_margin_softmax", {})
 
-        self._use_attention_residual = args.get("attention_residual", False)
+        self._attention_residual_config = args.get("attention_residual", {})
+        assert isinstance(self._attention_residual_config, dict), "ra need to be dict"
 
         self._use_teacher_confidence = args.get("teacher_confidence", False)
 
         self._groupwise_factors = args.get("groupwise_factors", {})
+        self._softtriple_config = args.get("softriple_regularizer", {})
 
         if args.get("proxy_nca", False):
             raise Exception("Use proxy_nca_config")
@@ -57,6 +71,9 @@ class UCIRTest(ICarl):
         self._use_npair = args.get("use_npair", False)
         self._use_mer = args.get("use_mer", False)
 
+        self._class_weights_config = args.get("class_weights_config", {})
+        self._focal_loss_gamma = args.get("focal_loss_gamma")
+
         self._evaluation_type = args.get("eval_type", "icarl")
         self._evaluation_config = args.get("evaluation_config", {})
 
@@ -65,8 +82,18 @@ class UCIRTest(ICarl):
         self._dso_config = args.get("dso_config", {})
         self._mc_config = args.get("mc_config", {})
         self._srip_config = args.get("srip_config", {})
+        self._double_margin_reg = args.get("double_margin_reg", {})
+
+        self._save_model = args["save_model"]
+
+        self._harmonic_embeddings = args.get("harmonic_embeddings", {})
 
         self._rotations_config = args.get("rotations_config", {})
+
+        self._eval_every_x_epochs = args.get("eval_every_x_epochs")
+        self._early_stopping = args.get("early_stopping", {})
+
+        self._random_noise_config = args.get("random_noise_config", {})
 
         classifier_kwargs = args.get("classifier_config", {})
         self._network = network.BasicNet(
@@ -77,7 +104,7 @@ class UCIRTest(ICarl):
             device=self._device,
             return_features=True,
             extract_no_act=True,
-            classifier_no_act=True,
+            classifier_no_act=args.get("classifier_no_act", True),
             attention_hook=True,
             rotations_predictor=bool(self._rotations_config),
             dropout=args.get("dropout")
@@ -129,7 +156,7 @@ class UCIRTest(ICarl):
         if self._alternate_training_config and self._task != 0:
             return self._alternate_training(train_loader, val_loader)
 
-        print("nb ", len(train_loader.dataset))
+        logger.debug("nb {}.".format(len(train_loader.dataset)))
         self._training_step(train_loader, val_loader, 0, self._n_epochs)
 
         self._post_processing_type = None
@@ -140,18 +167,31 @@ class UCIRTest(ICarl):
             self._saved_network = None
 
         if self._finetuning_config:
-            print("Fine-tuning")
+            logger.info("Fine-tuning")
             if self._finetuning_config["scaling"]:
-                print(
+                logger.info(
                     "Custom fine-tuning scaling of {}.".format(self._finetuning_config["scaling"])
                 )
                 self._post_processing_type = self._finetuning_config["scaling"]
 
-            self.build_examplars(self.inc_dataset)
+            self._data_memory, self._targets_memory, _, _ = self.build_examplars(
+                self.inc_dataset, self._herding_indexes
+            )
             loader = self.inc_dataset.get_memory_loader(*self.get_memory())
 
+            if self._finetuning_config["tuning"] == "all":
+                parameters = self._network.parameters()
+            elif self._finetuning_config["tuning"] == "convnet":
+                parameters = self._network.convnet.parameters()
+            elif self._finetuning_config["tuning"] == "classifier":
+                parameters = self._network.classifier.parameters()
+            else:
+                raise NotImplementedError(
+                    "Unknwown finetuning parameters {}.".format(self._finetuning_config["tuning"])
+                )
+
             self._optimizer = factory.get_optimizer(
-                self._network.parameters(), self._opt_name, 0.001, self.weight_decay
+                parameters, self._opt_name, 0.001, self.weight_decay
             )
             self._scheduler = None
             self._training_step(
@@ -178,7 +218,7 @@ class UCIRTest(ICarl):
     def _alternate_training(self, train_loader, val_loader):
         for phase in self._alternate_training_config:
             if phase["update_theta"]:
-                print("Updating theta")
+                logger.info("Updating theta")
                 for class_index in range(self._n_classes - self._task_size, self._n_classes):
                     _, loader = self.inc_dataset.get_custom_loader([class_index])
                     features, _ = utils.extract_features(self._network, loader)
@@ -190,8 +230,8 @@ class UCIRTest(ICarl):
 
             self._network.freeze(trainable=phase["train_f"], model="convnet")
             self._network.freeze(trainable=phase["train_theta"], model="classifier")
-            print("Freeze convnet=" + str(phase["train_f"]))
-            print("Freeze classifier=" + str(phase["train_theta"]))
+            logger.info("Freeze convnet=" + str(phase["train_f"]))
+            logger.info("Freeze classifier=" + str(phase["train_theta"]))
 
             self._optimizer = factory.get_optimizer(
                 self._network.parameters(), self._opt_name, self._lr, self._weight_decay
@@ -223,7 +263,7 @@ class UCIRTest(ICarl):
             self._compressed_data[class_index] = selected_features
             self._compressed_targets[class_index] = selected_targets
 
-        print(
+        logger.info(
             "{} compressed memory, or {} per class.".format(
                 sum(len(x) for x in self._compressed_data.values()),
                 self.quantity_compressed_embeddings
@@ -232,7 +272,7 @@ class UCIRTest(ICarl):
 
         # Taking in account the mean shift of the class:
         if self._compressed_memory["mean_shift"]:
-            print("Computing mean shift")
+            logger.info("Computing mean shift")
             for class_index in range(self._n_classes - self._task_size):
                 class_memory, class_targets = utils.select_class_samples(
                     self._data_memory, self._targets_memory, class_index
@@ -268,21 +308,49 @@ class UCIRTest(ICarl):
 
         if self._network.post_processor is None:
             s = None
-        elif hasattr(self._network.post_processor, "scale"):
-            s = self._network.post_processor.scale.item()
         elif hasattr(self._network.post_processor, "factor"):
-            s = self._network.post_processor.factor
-        print("Scale is {}.".format(s))
+            if isinstance(self._network.post_processor.factor, float):
+                s = self._network.post_processor.factor
+            else:
+                s = self._network.post_processor.factor.item()
+        else:
+            s = None
+        logger.info("Scale is {}.".format(s))
 
         self._args["_logs"]["scale"].append(s)
 
     def _eval_task(self, test_loader):
         if self._evaluation_type in ("icarl", "nme"):
             return super()._eval_task(test_loader)
+        elif self._evaluation_type == "weights_knn":
+            logger.debug("weights_knn: {}.".format(self._evaluation_config))
+            features_test, targets_test = utils.extract_features(self._network, test_loader)
+
+            weights = self._network.classifier.weights.cpu().detach().numpy()
+            targets = []
+            k = len(weights) // self._n_classes
+            for c in range(self._n_classes):
+                targets.extend([c for c in range(k)])
+
+            return utils.apply_knn(
+                weights,
+                targets,
+                features_test,
+                targets_test,
+                nb_neighbors=k,
+                normalize=self._evaluation_config.get("normalize", False)
+            )
         elif self._evaluation_type == "knn":
-            print("knn", self._evaluation_config)
-            _, loader = self.inc_dataset.get_custom_loader([], memory=self.get_memory())
+            logger.debug("knn: {}.".format(self._evaluation_config))
+            loader = self.inc_dataset.get_custom_loader([], memory=self.get_memory(), mode="test")[1]
             features, targets = utils.extract_features(self._network, loader)
+
+            if self._evaluation_config["flip"]:
+                loader = self.inc_dataset.get_custom_loader([], memory=self.get_memory(), mode="flip")[1]
+                features_flip, targets_flip = utils.extract_features(self._network, loader)
+                features = torch.cat((features, features_flip))
+                targets = torch.cat((targets, targets_flip))
+
             features_test, targets_test = utils.extract_features(self._network, test_loader)
 
             return utils.apply_knn(
@@ -291,10 +359,11 @@ class UCIRTest(ICarl):
                 features_test,
                 targets_test,
                 nb_neighbors=self._evaluation_config["nb_neighbors"],
-                pre_normalize=self._evaluation_config.get("pre_normalize", False)
+                normalize=self._evaluation_config.get("normalize", False),
+                weights=self._evaluation_config.get("weights", "uniform")
             )
         elif self._evaluation_type == "kmeans":
-            print("kmeans + knn", self._evaluation_config)
+            logger.debug("kmeans + knn {}".format(self._evaluation_config))
             _, loader = self.inc_dataset.get_custom_loader([], memory=self.get_memory())
             features, targets = utils.extract_features(self._network, loader)
 
@@ -302,7 +371,7 @@ class UCIRTest(ICarl):
                 features,
                 targets,
                 nb_clusters=self._evaluation_config.get("nb_clusters", 1),
-                pre_normalize=self._evaluation_config.get("pre_normalize", False)
+                pre_normalize=self._evaluation_config.get("normalize", False)
             )
             features_test, targets_test = utils.extract_features(self._network, test_loader)
 
@@ -318,10 +387,10 @@ class UCIRTest(ICarl):
             ypred = []
             ytrue = []
 
-            for inputs, targets, _ in test_loader:
-                ytrue.append(targets.numpy())
+            for input_dict in test_loader:
+                ytrue.append(input_dict["targets"].numpy())
 
-                inputs = inputs.to(self._device)
+                inputs = input_dict["inputs"].to(self._device)
                 logits = self._network(inputs)[1]
 
                 preds = logits.argmax(dim=1)
@@ -337,56 +406,52 @@ class UCIRTest(ICarl):
     def _gen_weights(self):
         if self._weight_generation:
             utils.add_new_weights(
-                self._network, self._weight_generation if self._task != 0 else "basic", self._n_classes,
-                self._task_size, self.inc_dataset
+                self._network, self._weight_generation if self._task != 0 else "basic",
+                self._n_classes, self._task_size, self.inc_dataset
             )
 
     def _before_task(self, train_loader, val_loader):
         if self._saved_network is not None:
-            print("Re-using saved network before finetuning")
+            logger.warning("Re-using saved network before finetuning")
             self._network = self._saved_network
 
         self._gen_weights()
         self._n_classes += self._task_size
-        print("Now {} examplars per class.".format(self._memory_per_class))
+        logger.info("Now {} examplars per class.".format(self._memory_per_class))
 
         if self._groupwise_factors:
             params = []
             for group_name, group_params in self._network.group_parameters.items():
-                params.append({"params": group_params,
-                               "lr": self._lr * self._groupwise_factors.get(group_name, 1.0)})
+                params.append(
+                    {
+                        "params": group_params,
+                        "lr": self._lr * self._groupwise_factors.get(group_name, 1.0)
+                    }
+                )
         else:
             params = self._network.parameters()
 
-        self._optimizer = factory.get_optimizer(
-            params, self._opt_name, self._lr, self.weight_decay
+        self._optimizer = factory.get_optimizer(params, self._opt_name, self._lr, self.weight_decay)
+
+        self._scheduler = factory.get_lr_scheduler(
+            self._scheduling,
+            self._optimizer,
+            nb_epochs=self._n_epochs,
+            lr_decay=self._lr_decay,
+            warmup_config=self._warmup_config,
+            task=self._task
         )
-
-        if isinstance(self._scheduling, list):
-            base_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-                self._optimizer, self._scheduling, gamma=self._lr_decay
-            )
-        elif self._scheduling == "cosine":
-            base_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self._optimizer, self._n_epochs
-            )
-
-        if self._warmup_config:
-            if self._warmup_config.get("only_first_step", True) and self._task != 0:
-                pass
-            else:
-                print("Using WarmUp")
-                self._scheduler = schedulers.GradualWarmupScheduler(
-                    optimizer=self._optimizer,
-                    after_scheduler=base_scheduler,
-                    **self._warmup_config
-                )
-        else:
-            self._scheduler = base_scheduler
 
         if self._compressed_memory:
             self._compressed_iterator = 0
             self._compressed_step = self.quantity_compressed_embeddings // len(train_loader)
+
+        if self._class_weights_config:
+            self._class_weights = torch.tensor(
+                data.get_class_weights(train_loader.dataset, **self._class_weights_config)
+            ).to(self._device)
+        else:
+            self._class_weights = None
 
     def _sample_compressed(self):
         features, logits, targets = [], [], []
@@ -411,6 +476,9 @@ class UCIRTest(ICarl):
     def _compute_loss(self, inputs, features_logits, targets, onehot_targets, memory_flags):
         features, logits, atts = features_logits
 
+        if self._random_noise_config:
+            logits = logits[:-self._random_noise_config["nb_per_batch"]]
+
         if self._compressed_memory and len(self._compressed_data) > 0:
             c_f, c_l, c_t = self._sample_compressed()
             features = torch.cat((features, c_f))
@@ -424,19 +492,30 @@ class UCIRTest(ICarl):
 
         if self._old_model is not None:
             with torch.no_grad():
-                old_features, old_logits, old_atts = self._old_model(inputs)
+                old_features, old_logits, old_atts = self._old_model(inputs.to(self._old_device))
+                old_features = old_features.to(self._device)
+                old_logits = old_logits.to(self._device)
+                old_atts = [a.to(self._device) for a in old_atts]
 
             if self._compressed_memory and len(self._compressed_data) > 0:
                 old_features = torch.cat((old_features, c_f))
                 old_logits = torch.cat((old_logits, self._old_model.classifier(c_f)))
 
-        if self._lambda_schedule:
-            scheduled_lambda = self._lambda * math.sqrt(self._n_classes / self._task_size)
-        else:
-            scheduled_lambda = 1.
+            if self._random_noise_config:
+                old_logits = old_logits[:-self._random_noise_config["nb_per_batch"]]
 
-        if self._use_ams_ce:
-            loss = losses.additive_margin_softmax_ce(logits, targets)
+        if self._ams_config:
+            ams_config = copy.deepcopy(self._ams_config)
+            if self._network.post_processor:
+                ams_config["scale"] = self._network.post_processor.factor
+
+            loss = losses.additive_margin_softmax_ce(
+                logits,
+                targets,
+                class_weights=self._class_weights,
+                focal_gamma=self._focal_loss_gamma,
+                **ams_config
+            )
             self._metrics["ams"] += loss.item()
         elif self._use_npair:
             loss = losses.n_pair_loss(logits, targets)
@@ -450,8 +529,18 @@ class UCIRTest(ICarl):
             )
             self._metrics["nca"] += loss.item()
         elif self._triplet_config:
-            loss = losses.triplet_loss(features, targets, **self._triplet_config)
+            loss, percent_violated = losses.triplet_loss(
+                features,
+                targets,
+                **self._triplet_config,
+                harmonic_embeddings=self._harmonic_embeddings,
+                old_features=old_features if self._old_model else None,
+                memory_flags=memory_flags,
+                epoch_percent=self._epoch_percent
+            )
+
             self._metrics["tri"] += loss.item()
+            self._metrics["violated"] += percent_violated
         else:
             if self._use_teacher_confidence and self._old_model is not None:
                 loss = losses.cross_entropy_teacher_confidence(
@@ -462,9 +551,13 @@ class UCIRTest(ICarl):
                 loss = F.cross_entropy(scaled_logits, targets)
                 self._metrics["clf"] += loss.item()
 
+        # ----------------------
+        # Regularization losses:
+        # ----------------------
+
         if self._weights_orthogonality is not None:
             margin = self._weights_orthogonality.get("margin")
-            ortho_loss = scheduled_lambda * losses.weights_orthogonality(
+            ortho_loss = losses.weights_orthogonality(
                 self._network.classifier.weights, margin=margin
             )
             loss += ortho_loss
@@ -472,7 +565,7 @@ class UCIRTest(ICarl):
 
         if self._gor_config:
             gor_loss = losses.global_orthogonal_regularization(
-                features, targets, **self._gor_config
+                features, targets, self._n_classes - self._task_size, **self._gor_config
             )
             self._metrics["gor"] += gor_loss.item()
             loss += gor_loss
@@ -505,13 +598,40 @@ class UCIRTest(ICarl):
             self._metrics["srip"] += srip_loss.item()
             loss += srip_loss
 
+        if self._softtriple_config:
+            st_reg = losses.softriple_regularizer(
+                self._network.classifier.weights, self._softtriple_config
+            )
+            self._metrics["st_reg"] += st_reg.item()
+            loss += st_reg
+
+        if self._double_margin_reg:
+            dm_reg = losses.double_margin_constrastive_regularization(
+                self._network.classifier.weights,
+                self._task * self._task_size,
+                old_weights=self._old_model.classifier.weights.to(self._device)
+                if self._old_model else None,
+                **self._double_margin_reg
+            )
+            self._metrics["dm_reg"] += dm_reg.item()
+            loss += dm_reg
+
+        # --------------------
+        # Distillation losses:
+        # --------------------
+
         if self._old_model is not None:
-            if self._use_less_forget:
-                distil_loss = scheduled_lambda * losses.embeddings_similarity(
-                    old_features, features
-                )
+            if self._less_forget_config:
+                if self._less_forget_config["scheduled_factor"]:
+                    factor = self._less_forget_config["lambda"] * math.sqrt(
+                        self._n_classes / self._task_size
+                    )
+                else:
+                    factor = self._less_forget_config.get("factor", 1.)
+
+                distil_loss = factor * losses.embeddings_similarity(old_features, features)
                 loss += distil_loss
-                self._metrics["dis"] += distil_loss.item()
+                self._metrics["lf"] += distil_loss.item()
             elif self._use_mimic_score:
                 old_class_logits = logits[..., :self._n_classes - self._task_size]
                 old_class_old_logits = old_logits[..., :self._n_classes - self._task_size]
@@ -533,8 +653,8 @@ class UCIRTest(ICarl):
                 loss += ranking_loss
                 self._metrics["rank"] += ranking_loss.item()
 
-            if self._use_relative_teachers:
-                if self._relative_teachers_old:
+            if self._relative_teachers_config:
+                if self._relative_teachers_config["select"] == "old":
                     indexes_old = memory_flags.eq(1.)
                     old_features_memory = old_features[indexes_old]
                     new_features_memory = features[indexes_old]
@@ -543,13 +663,22 @@ class UCIRTest(ICarl):
                     new_features_memory = features
 
                 relative_t_loss = losses.relative_teacher_distances(
-                    old_features_memory, new_features_memory
+                    old_features_memory, new_features_memory, **self._relative_teachers_config
                 )
-                loss += scheduled_lambda * relative_t_loss
+                loss += self._relative_teachers_config["factor"] * relative_t_loss
                 self._metrics["rel"] += relative_t_loss.item()
 
-            if self._use_attention_residual:
-                attention_loss = losses.residual_attention_distillation(old_atts, atts)
+            if self._attention_residual_config:
+                if self._attention_residual_config.get("scheduled_factor", False):
+                    factor = self._attention_residual_config["lambda"] * math.sqrt(
+                        self._n_classes / self._task_size
+                    )
+                else:
+                    factor = self._attention_residual_config.get("factor", 1.)
+
+                attention_loss = factor * losses.residual_attention_distillation(
+                    old_atts, atts, **self._attention_residual_config
+                )
                 loss += attention_loss
                 self._metrics["att"] += attention_loss.item()
 

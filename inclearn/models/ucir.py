@@ -32,6 +32,8 @@ class UCIR(ICarl):
         self._fixed_memory = args["fixed_memory"]
         self._n_classes = 0
 
+        self._eval_every_x_epochs = args.get("eval_every_x_epochs")
+
         if "distillation_loss" in args:
             warnings.warn("distillation_loss is replaced by less_forget")
             args["less_forget"] = args["distillation_loss"]

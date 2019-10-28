@@ -1,5 +1,6 @@
 import collections
 import copy
+import logging
 import os
 import pdb
 
@@ -13,6 +14,8 @@ from inclearn.lib import factory, herding, losses, network, schedulers, utils
 from inclearn.models.base import IncrementalLearner
 
 EPSILON = 1e-8
+
+logger = logging.getLogger(__name__)
 
 
 class ICarl(IncrementalLearner):
@@ -31,7 +34,9 @@ class ICarl(IncrementalLearner):
 
         self._disable_progressbar = args.get("no_progressbar", False)
 
-        self._device = args["device"]
+        self._device = args["device"][0]
+        self._old_device = args["device"][-1]
+
         self._opt_name = args["optimizer"]
         self._lr = args["lr"]
         self._weight_decay = args["weight_decay"]
@@ -44,12 +49,18 @@ class ICarl(IncrementalLearner):
         if self._warmup_config and self._warmup_config["total_epoch"] > 0:
             self._lr /= self._warmup_config["multiplier"]
 
+        self._eval_every_x_epochs = args.get("eval_every_x_epochs")
+        self._early_stopping = args.get("early_stopping", {})
+
         self._memory_size = args["memory_size"]
         self._fixed_memory = args["fixed_memory"]
         self._herding_selection = args.get("herding_selection", "icarl")
         self._n_classes = 0
 
         self._rotations_config = args.get("rotations_config", {})
+        self._random_noise_config = args.get("random_noise_config", {})
+
+        self._save_model = args["save_model"]
 
         self._network = network.BasicNet(
             args["convnet"],
@@ -74,11 +85,32 @@ class ICarl(IncrementalLearner):
 
         self._herding_indexes = []
 
+        self._epoch_metrics = collections.defaultdict(list)
+
+    @property
+    def epoch_metrics(self):
+        return dict(self._epoch_metrics)
+
     def eval(self):
         self._network.eval()
 
     def train(self):
         self._network.train()
+
+    @property
+    def network(self):
+        return self._network
+
+    @network.setter
+    def network(self, network_path):
+        if self._network is not None:
+            del self._network
+
+        logger.info("Loading model from {}.".format(network_path))
+        self._network = torch.load(network_path)
+        self._network.to(self._device)
+        self._network.device = self._device
+        self._network.classifier.device = self._device
 
     # ----------
     # Public API
@@ -87,7 +119,7 @@ class ICarl(IncrementalLearner):
     def _before_task(self, train_loader, val_loader):
         self._n_classes += self._task_size
         self._network.add_classes(self._task_size)
-        print("Now {} examplars per class.".format(self._memory_per_class))
+        logger.info("Now {} examplars per class.".format(self._memory_per_class))
 
         self._optimizer = factory.get_optimizer(
             self._network.parameters(), self._opt_name, self._lr, self._weight_decay
@@ -101,7 +133,7 @@ class ICarl(IncrementalLearner):
             if self._warmup_config.get("only_first_step", True) and self._task != 0:
                 pass
             else:
-                print("Using WarmUp")
+                logger.info("Using WarmUp")
                 self._scheduler = schedulers.GradualWarmupScheduler(
                     optimizer=self._optimizer,
                     after_scheduler=base_scheduler,
@@ -111,12 +143,17 @@ class ICarl(IncrementalLearner):
             self._scheduler = base_scheduler
 
     def _train_task(self, train_loader, val_loader):
-        print("nb ", len(train_loader.dataset))
+        logger.debug("nb {}.".format(len(train_loader.dataset)))
         self._training_step(train_loader, val_loader, 0, self._n_epochs)
 
     def _training_step(self, train_loader, val_loader, initial_epoch, nb_epochs):
+        best_epoch, best_acc = -1, -1.
+        wait = 0
+
         for epoch in range(initial_epoch, nb_epochs):
             self._metrics = collections.defaultdict(float)
+
+            self._epoch_percent = epoch / (nb_epochs - initial_epoch)
 
             prog_bar = tqdm(
                 train_loader,
@@ -138,6 +175,30 @@ class ICarl(IncrementalLearner):
             if self._scheduler:
                 self._scheduler.step(epoch)
 
+            if self._eval_every_x_epochs and epoch != 0 and epoch % self._eval_every_x_epochs == 0:
+                self._network.eval()
+                self._data_memory, self._targets_memory, self._herding_indexes, self._class_means = self.build_examplars(
+                    self.inc_dataset, self._herding_indexes
+                )
+                ytrue, ypred = self._eval_task(val_loader)
+                acc = 100 * round((ypred == ytrue).sum() / len(ytrue), 3)
+                logger.info("Val accuracy: {}".format(acc))
+                self._network.train()
+
+                if acc > best_acc:
+                    best_epoch = epoch
+                    best_acc = acc
+                    wait = 0
+                else:
+                    wait += 1
+
+                if self._early_stopping and self._early_stopping["patience"] > wait:
+                    logger.warning("Early stopping!")
+                    break
+
+        if self._eval_every_x_epochs:
+            logger.info("Best accuracy reached at epoch {} with {}%.".format(best_epoch, best_acc))
+
     def _print_metrics(self, prog_bar, epoch, nb_epochs, nb_batches):
         pretty_metrics = ", ".join(
             "{}: {}".format(metric_name, round(metric_value / nb_batches, 3))
@@ -153,6 +214,11 @@ class ICarl(IncrementalLearner):
     def _forward_loss(self, inputs, targets, memory_flags):
         inputs, targets = inputs.to(self._device), targets.to(self._device)
         onehot_targets = utils.to_onehot(targets, self._n_classes).to(self._device)
+
+        if self._random_noise_config:
+            random_noise = torch.randn(self._random_noise_config["nb_per_batch"], *inputs.shape[1:])
+            inputs = torch.cat((inputs, random_noise.to(self._device)))
+
         logits = self._network(inputs)
 
         loss = self._compute_loss(inputs, logits, targets, onehot_targets, memory_flags)
@@ -169,7 +235,7 @@ class ICarl(IncrementalLearner):
             inc_dataset, self._herding_indexes
         )
 
-        self._old_model = self._network.copy().freeze()
+        self._old_model = self._network.copy().freeze().to(self._old_device)
 
         self._network.on_task_end()
         self.plot_tsne()
@@ -195,7 +261,8 @@ class ICarl(IncrementalLearner):
         if self._old_model is None:
             loss = F.binary_cross_entropy_with_logits(logits, onehot_targets)
         else:
-            old_targets = torch.sigmoid(self._old_model(inputs).detach())
+            old_targets = torch.sigmoid(self._old_model(inputs.to(self._old_device)).detach()
+                                       ).to(self._device)
 
             new_targets = onehot_targets.clone()
             new_targets[..., :-self._task_size] = old_targets
@@ -259,8 +326,10 @@ class ICarl(IncrementalLearner):
     # Memory management
     # -----------------
 
-    def build_examplars(self, inc_dataset, herding_indexes, memory_per_class=None):
-        print("Building & updating memory.")
+    def build_examplars(
+        self, inc_dataset, herding_indexes, memory_per_class=None, data_source="train"
+    ):
+        logger.info("Building & updating memory.")
         memory_per_class = memory_per_class or self._memory_per_class
         herding_indexes = copy.deepcopy(herding_indexes)
 
@@ -269,11 +338,13 @@ class ICarl(IncrementalLearner):
 
         for class_idx in range(self._n_classes):
             # We extract the features, both normal and flipped:
-            inputs, loader = inc_dataset.get_custom_loader(class_idx, mode="test")
+            inputs, loader = inc_dataset.get_custom_loader(
+                class_idx, mode="test", data_source=data_source
+            )
             features, targets = utils.extract_features(self._network, loader)
             features_flipped, _ = utils.extract_features(
                 self._network,
-                inc_dataset.get_custom_loader(class_idx, mode="flip")[1]
+                inc_dataset.get_custom_loader(class_idx, mode="flip", data_source=data_source)[1]
             )
 
             if class_idx >= self._n_classes - self._task_size:
@@ -332,9 +403,6 @@ class ICarl(IncrementalLearner):
     @staticmethod
     def compute_accuracy(model, loader, class_means):
         features, targets_ = utils.extract_features(model, loader)
-
-        targets = np.zeros((targets_.shape[0], 100), np.float32)
-        targets[range(len(targets_)), targets_.astype('int32')] = 1.
 
         features = (features.T / (np.linalg.norm(features.T, axis=0) + EPSILON)).T
 
