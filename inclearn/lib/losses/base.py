@@ -97,7 +97,15 @@ def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memo
     return loss
 
 
-def additive_margin_softmax_ce(similarities, targets, s=1, m=0.):
+def additive_margin_softmax_ce(
+    similarities,
+    targets,
+    class_weights=None,
+    focal_gamma=None,
+    scale=1,
+    margin=0.,
+    exclude_pos_denominator=False
+):
     """Compute AMS cross-entropy loss.
 
     Reference:
@@ -105,31 +113,29 @@ def additive_margin_softmax_ce(similarities, targets, s=1, m=0.):
           Additive Margin Softmax for Face Verification.
           Signal Processing Letters 2018.
 
-    Inspired by (but speed up x7):
-        * https://github.com/cvqluu/Additive-Margin-Softmax-Loss-Pytorch
-
     :param similarities: Result of cosine similarities between weights and features.
     :param targets: Sparse targets.
     :param s: Multiplicative factor, can be learned.
     :param m: Margin applied on the "right" similarities.
     :return: A float scalar loss.
     """
-    # Ensure numerically stable computation:
-    max_values = similarities.max(dim=1)[0].view(-1, 1).repeat(1, similarities.shape[1])
-    max_values.data[max_values.data < 0.] = 0.
-    similarities = similarities - max_values
+    margins = torch.zeros_like(similarities)
+    margins[torch.arange(margins.shape[0]), targets] = margin
+    similarities = scale * (similarities - margin)
 
-    numerator = s * (torch.diagonal(similarities.transpose(0, 1)[targets]) - m)
+    if exclude_pos_denominator:
+        similarities = similarities - similarities.max(1)[0].view(-1, 1)  # Stability
 
-    neg_denominator = torch.exp(s * similarities)
-    mask = torch.ones(similarities.shape[0], similarities.shape[1]).to(similarities.device)
-    mask[torch.arange(similarities.shape[0]), targets] = 0
-    neg_denominator = neg_denominator * mask
+        disable_pos = torch.zeros_like(similarities)
+        disable_pos[torch.arange(len(similarities)), targets] = similarities[torch.arange(len(similarities)), targets]
+        
+        numerator = similarities[torch.arange(similarities.shape[0]), targets]
+        denominator = similarities - disable_pos
 
-    denominator = torch.exp(numerator) + torch.sum(neg_denominator, dim=1)
-    loss = numerator - torch.log(denominator)
-    loss = -torch.mean(loss)
-    return loss
+        return -torch.mean(numerator - torch.log(torch.exp(denominator).sum(-1)))
+    
+    return F.cross_entropy(similarities, targets, weight=class_weights, reduction="mean")
+
 
 
 def embeddings_similarity(features_a, features_b):
