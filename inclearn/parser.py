@@ -30,8 +30,10 @@ def get_parser():
                         help="Number of class to add per task.")
     parser.add_argument("-b", "--batch-size", default=128, type=int,
                         help="Batch size.")
-    parser.add_argument("-w", "--workers", default=1, type=int,
+    parser.add_argument("-w", "--workers", default=0, type=int,
                         help="Number of workers preprocessing the data.")
+    parser.add_argument("-t", "--threads", default=1, type=int,
+                        help="Number of threads allocated for PyTorch.")
     parser.add_argument("-v", "--validation", default=0., type=float,
                         help="Validation split (0. <= x < 1.).")
     parser.add_argument("-random", "--random-classes", action="store_true", default=False,
@@ -63,7 +65,7 @@ def get_parser():
                         help="Number of epochs per task.")
 
     # Misc:
-    parser.add_argument("--device", default=0, type=int,
+    parser.add_argument("--device", default=[0], type=int, nargs="+",
                         help="GPU index to use, for cpu use -1.")
     parser.add_argument("--label", type=str,
                         help="Experience name, if used a log will be created.")
@@ -75,9 +77,14 @@ def get_parser():
                         help="Seed range going from first number to second (both included).")
     parser.add_argument("-options", "--options", nargs="+",
                         help="A list of options files.")
-    parser.add_argument("-save", "--save-model", choices=["last", "task"],
-                        default="last",
+    parser.add_argument("-save", "--save-model", choices=["never", "last", "task"],
+                        default="never",
                         help="Save the network, either the `last` one or"
                              " each `task`'s ones.")
+    parser.add_argument("-log", "--logging", choices=["critical", "warning", "info", "debug"],
+                        default="info", help="Logging level")
+    parser.add_argument("-resume", "--resume", default=None,
+                        help="Resume from previously saved model, "
+                             "must be in the format `*_task_[0-9]+\.pth`.")
 
     return parser
