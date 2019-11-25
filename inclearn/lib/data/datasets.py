@@ -1,8 +1,12 @@
+import glob
+import logging
 import os
 import warnings
 
 import numpy as np
 from torchvision import datasets, transforms
+
+logger = logging.getLogger(__name__)
 
 
 class DataHandler:
@@ -12,6 +16,10 @@ class DataHandler:
     common_transforms = [transforms.ToTensor()]
     class_order = None
     open_image = False
+
+    def set_custom_transforms(self, transforms):
+        if transforms:
+            raise NotImplementedError("Not implemented for modified transforms.")
 
 
 class iCIFAR10(DataHandler):
@@ -78,6 +86,12 @@ class ImageNet100(DataHandler):
 
     imagenet_size = 100
     open_image = True
+    suffix = ""
+
+    def set_custom_transforms(self, transforms):
+        if not transforms.get("color_jitter"):
+            logger.info("Not using color jitter.")
+            self.train_transforms.pop(-1)
 
     def base_dataset(self, data_path, train=True, download=False):
         if download:
@@ -89,7 +103,9 @@ class ImageNet100(DataHandler):
         split = "train" if train else "val"
 
         print("Loading metadata of ImageNet_{} ({} split).".format(self.imagenet_size, split))
-        metadata_path = os.path.join(data_path, "{}_{}.txt".format(split, self.imagenet_size))
+        metadata_path = os.path.join(
+            data_path, "{}_{}{}.txt".format(split, self.imagenet_size, self.suffix)
+        )
 
         self.data, self.targets = [], []
         with open(metadata_path) as f:
@@ -104,5 +120,78 @@ class ImageNet100(DataHandler):
         return self
 
 
-class ImageNet1000(DataHandler):
+class ImageNet100UCIR(ImageNet100):
+    suffix = "_ucir"
+
+
+class ImageNet1000(ImageNet100):
     imagenet_size = 1000
+
+
+class TinyImageNet200(DataHandler):
+    train_transforms = [
+        transforms.RandomCrop(64),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=63 / 255)
+    ]
+    test_transforms = [transforms.Resize(64)]
+    common_transforms = [
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ]
+
+    open_image = True
+
+    class_order = list(range(200))
+
+    def set_custom_transforms(self, transforms_dict):
+        if not transforms_dict.get("color_jitter"):
+            logger.info("Not using color jitter.")
+            self.train_transforms.pop(-1)
+        if transforms_dict.get("crop"):
+            logger.info("Crop with padding of {}".format(transforms_dict.get("crop")))
+            self.train_transforms[0] = transforms.RandomCrop(64, padding=transforms_dict.get("crop"))
+
+    def base_dataset(self, data_path, train=True, download=False):
+        if train:
+            self._train_dataset(data_path)
+        else:
+            self._val_dataset(data_path)
+
+        return self
+
+    def _train_dataset(self, data_path):
+        self.data, self.targets = [], []
+
+        train_dir = os.path.join(data_path, "train")
+        for class_id, class_name in enumerate(os.listdir(train_dir)):
+            paths = glob.glob(os.path.join(train_dir, class_name, "images", "*.JPEG"))
+            targets = [class_id for _ in range(len(paths))]
+
+            self.data.extend(paths)
+            self.targets.extend(targets)
+
+        self.data = np.array(self.data)
+
+    def _val_dataset(self, data_path):
+        self.data, self.targets = [], []
+
+        self.classes2id = {
+            class_name: class_id
+            for class_id, class_name in enumerate(os.listdir(os.path.join(data_path, "train")))
+        }
+        self.id2classes = {
+            v: k for k, v in self.classes2id.items()
+        }
+
+        with open(os.path.join(data_path, "val", "val_annotations.txt")) as f:
+            for line in f:
+                split_line = line.split("\t")
+
+                path, class_label = split_line[0], split_line[1]
+                class_id = self.classes2id[class_label]
+
+                self.data.append(os.path.join(data_path, "val", "images", path))
+                self.targets.append(class_id)
+
+        self.data = np.array(self.data)

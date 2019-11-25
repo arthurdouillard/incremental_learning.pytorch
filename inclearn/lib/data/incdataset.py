@@ -1,13 +1,16 @@
+import logging
 import random
 
 import numpy as np
 import torch
 from PIL import Image
-from skimage import io
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from .datasets import ImageNet100, ImageNet1000, iCIFAR10, iCIFAR100
+from .datasets import (ImageNet100, ImageNet100UCIR, ImageNet1000,
+                       TinyImageNet200, iCIFAR10, iCIFAR100)
+
+logger = logging.getLogger(__name__)
 
 
 class IncrementalDataset:
@@ -45,8 +48,8 @@ class IncrementalDataset:
         sampler=None,
         sampler_config=None,
         data_path="data",
-        rotations=None,
         class_order=None,
+        dataset_transforms=None
     ):
         datasets = _get_datasets(dataset_name)
         self._setup_data(
@@ -59,9 +62,12 @@ class IncrementalDataset:
             initial_increment=initial_increment,
             data_path=data_path
         )
-        self.train_transforms = datasets[0].train_transforms  # FIXME handle multiple datasets
-        self.test_transforms = datasets[0].test_transforms
-        self.common_transforms = datasets[0].common_transforms
+
+        dataset = datasets[0]()
+        dataset.set_custom_transforms(dataset_transforms)
+        self.train_transforms = dataset.train_transforms  # FIXME handle multiple datasets
+        self.test_transforms = dataset.test_transforms
+        self.common_transforms = dataset.common_transforms
 
         self.open_image = datasets[0].open_image
 
@@ -74,7 +80,6 @@ class IncrementalDataset:
         self._onehot = onehot
         self._sampler = sampler
         self._sampler_config = sampler_config
-        self._rotations = rotations
 
     @property
     def n_tasks(self):
@@ -150,7 +155,9 @@ class IncrementalDataset:
 
         return x, y, memory_flags
 
-    def get_custom_loader(self, class_indexes, memory=None, mode="test", data_source="train"):
+    def get_custom_loader(
+        self, class_indexes, memory=None, mode="test", data_source="train", sampler=None
+    ):
         """Returns a custom loader.
 
         :param class_indexes: A list of class indexes that we want.
@@ -193,7 +200,9 @@ class IncrementalDataset:
         else:
             memory_flags = np.zeros((data.shape[0],))
 
-        return data, self._get_loader(data, targets, memory_flags, shuffle=False, mode=mode)
+        return data, self._get_loader(
+            data, targets, memory_flags, shuffle=False, mode=mode, sampler=sampler
+        )
 
     def get_memory_loader(self, data, targets):
         return self._get_loader(
@@ -204,7 +213,7 @@ class IncrementalDataset:
         idxes = np.where(np.logical_and(y >= low_range, y < high_range))[0]
         return x[idxes], y[idxes]
 
-    def _get_loader(self, x, y, memory_flags, shuffle=True, mode="train"):
+    def _get_loader(self, x, y, memory_flags, shuffle=True, mode="train", sampler=None):
         if mode == "train":
             trsf = transforms.Compose([*self.train_transforms, *self.common_transforms])
         elif mode == "test":
@@ -219,8 +228,10 @@ class IncrementalDataset:
         else:
             raise NotImplementedError("Unknown mode {}.".format(mode))
 
-        if self._sampler is not None and mode == "train":
-            sampler = self._sampler(y, **self._sampler_config)
+        sampler = sampler or self._sampler
+        if sampler is not None and mode == "train":
+            logger.info("Using sampler {}".format(sampler))
+            sampler = sampler(y, memory_flags, batch_size=self._batch_size, **self._sampler_config)
             batch_size = 1
         else:
             sampler = None
@@ -385,7 +396,11 @@ def _get_dataset(dataset_name):
         return iCIFAR100
     elif dataset_name == "imagenet100":
         return ImageNet100
+    elif dataset_name == "imagenet100ucir":
+        return ImageNet100UCIR
     elif dataset_name == "imagenet1000":
         return ImageNet1000
+    elif dataset_name == "tinyimagenet":
+        return TinyImageNet200
     else:
         raise NotImplementedError("Unknown dataset {}.".format(dataset_name))
