@@ -1,3 +1,5 @@
+import functools
+
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -65,7 +67,7 @@ def global_orthogonal_regularization(
     positive_indexes, negative_indexes = [], []
     targets = targets.cpu().numpy()
     unique_targets = set(targets)
-    if len(unique_targets) == 0:
+    if len(unique_targets) == 1:
         return torch.tensor(0.)
 
     if sampling == "per_target":
@@ -220,6 +222,7 @@ def double_margin_constrastive_regularization(
     K=None,
     intra_margin=0.2,
     inter_margin=0.8,
+    regroup_intra=False,
     inter_old_vs_new=False,
     normalize=True,
     intra_aggreg="mean",
@@ -265,38 +268,42 @@ def double_margin_constrastive_regularization(
     loss = 0.
 
     if intra_margin is not None and K > 1:
-        intra_mask = _dmr_intra_mask(dist.shape[0], C, K)
-        intra_dist = dist[intra_mask]
-        intra_losses = torch.clamp(intra_margin - intra_dist, min=0.)
+        intra_mask = _dmr_intra_mask(dist.shape[0], C, K, weights.device)
+        intra_dist = _index_mask(dist, intra_mask)
+
+        if regroup_intra:
+            intra_losses = torch.clamp(intra_dist - intra_margin, min=0.)
+        else:
+            intra_losses = torch.clamp(intra_margin - intra_dist, min=0.)
 
         intra_loss = _dmr_aggreg(intra_losses, aggreg_mode=intra_aggreg)
         loss += intra_loss
 
     if inter_margin is not None and not (inter_old_vs_new and current_index == 0):
         if inter_old_vs_new:
-            inter_mask = _dmr_inter_oldvsnew_mask(dist.shape[0], current_index)
+            inter_mask = _dmr_inter_oldvsnew_mask(dist.shape[0], current_index, weights.device)
             inter_dist = dist[inter_mask]
         elif adaptative_margin and old_weights is not None:
             old_dist = _dmr_weights_distance(old_weights, square=square).to(weights.device)
             nb_old_classes = old_weights.shape[0] // K
 
-            inter_mask_old = _dmr_inter_mask(old_dist.shape[0], nb_old_classes, K)
-            inter_mask_oldnew = _dmr_inter_mask(dist.shape[0], C, K)
+            inter_mask_old = _dmr_inter_mask(old_dist.shape[0], nb_old_classes, K, weights.device)
+            inter_mask_oldnew = _dmr_inter_mask(dist.shape[0], C, K, weights.device)
             inter_mask_oldnew[nb_old_classes * K:] = False
             inter_mask_oldnew[..., nb_old_classes * K:] = False
 
-            inter_mask_new = _dmr_inter_mask(dist.shape[0], C, K)
+            inter_mask_new = _dmr_inter_mask(dist.shape[0], C, K, weights.device)
             inter_mask_new[:nb_old_classes * K, :nb_old_classes * K] = False
 
-            old_inter_dist = old_dist[inter_mask_old]
+            old_inter_dist = _index_mask(old_dist, inter_mask_old)
             d = torch.clamp(old_inter_dist, min=0.)
             adaptative_margins = (
                 (adaptative_margin_max - adaptative_margin_min) / torch.max(d)
             ) * d + adaptative_margin_min
 
-            oldnew_inter_dist = dist[inter_mask_oldnew]
+            oldnew_inter_dist = _index_mask(dist, inter_mask_oldnew)
 
-            new_inter_dist = dist[inter_mask_new]
+            new_inter_dist = _index_mask(dist, inter_mask_new)
 
             inter_dist = torch.cat((oldnew_inter_dist, new_inter_dist))
             inter_margin = torch.cat(
@@ -307,12 +314,27 @@ def double_margin_constrastive_regularization(
             )
             assert len(oldnew_inter_dist) == len(old_inter_dist) == len(adaptative_margins)
         else:
-            inter_mask = _dmr_inter_mask(dist.shape[0], C, K)
-            inter_dist = dist[inter_mask]
+            inter_mask = _dmr_inter_mask(dist.shape[0], C, K, weights.device)
+            inter_dist = _index_mask(dist, inter_mask)
 
-        inter_losses = torch.clamp(inter_margin - inter_dist, min=0.)
-        inter_loss = _dmr_aggreg(inter_losses, aggreg_mode=inter_aggreg)
-        loss += inter_loss
+        if isinstance(inter_margin, float):
+            inter_losses = torch.clamp(inter_margin - inter_dist, min=0.)
+            inter_loss = _dmr_aggreg(inter_losses, aggreg_mode=inter_aggreg)
+            loss += inter_loss
+        elif inter_margin == "gor":
+            simi = -0.5 * (inter_dist - 2)
+            first_moment = torch.mean(simi)
+            second_moment = torch.mean(torch.pow(simi, 2))
+            inter_loss = torch.pow(first_moment, 2) + torch.clamp(second_moment - 1. / weights.shape[-1], min=0.)
+            loss += inter_loss
+        elif inter_margin == "simi":
+            if square:
+                inter_dist = torch.pow(inter_dist, 2)
+            simi = torch.abs(-0.5 * (inter_dist - 2))
+            inter_loss = _dmr_aggreg(simi, aggreg_mode="adamine")
+            loss += inter_loss
+        else:
+            assert False, inter_margin
 
     if isinstance(loss, float):
         loss = torch.tensor(0.).to(weights.device)
@@ -320,7 +342,12 @@ def double_margin_constrastive_regularization(
     return factor * loss
 
 
-def _dmr_inter_mask(size, nb_classes, nb_clusters):
+def _index_mask(tensor, mask):
+    return torch.masked_select(tensor, mask)
+
+
+@functools.lru_cache(maxsize=64, typed=False)
+def _dmr_inter_mask(size, nb_classes, nb_clusters, device):
     inter_mask = ~torch.ones(size, size).bool()
     lower_tri = torch.tensor(np.tril_indices(size, k=0))
 
@@ -328,20 +355,22 @@ def _dmr_inter_mask(size, nb_classes, nb_clusters):
         inter_mask[c * nb_clusters:(c + 1) * nb_clusters, (c + 1) * nb_clusters:] = True
     inter_mask[lower_tri[0], lower_tri[1]] = False
 
-    return inter_mask
+    return inter_mask.to(device)
 
 
-def _dmr_inter_oldvsnew_mask(size, current_index):
+@functools.lru_cache(maxsize=64, typed=False)
+def _dmr_inter_oldvsnew_mask(size, current_index, device):
     inter_mask = ~torch.ones(size, size).bool()
     lower_tri = torch.tensor(np.tril_indices(size, k=0))
 
     inter_mask[:current_index, current_index:] = True
     inter_mask[lower_tri[0], lower_tri[1]] = False
 
-    return inter_mask
+    return inter_mask.to(device)
 
 
-def _dmr_intra_mask(size, nb_classes, nb_clusters):
+@functools.lru_cache(maxsize=64, typed=False)
+def _dmr_intra_mask(size, nb_classes, nb_clusters, device):
     intra_mask = ~torch.ones(size, size).bool()
     lower_tri = torch.tensor(np.tril_indices(size, k=0))
 
@@ -349,7 +378,7 @@ def _dmr_intra_mask(size, nb_classes, nb_clusters):
         intra_mask[c * nb_clusters:(c + 1) * nb_clusters, :(c + 1) * nb_clusters] = True
     intra_mask[lower_tri[0], lower_tri[1]] = False
 
-    return intra_mask
+    return intra_mask.to(device)
 
 
 def _dmr_weights_distance(weights, square=True):
@@ -368,7 +397,11 @@ def _dmr_aggreg(losses, aggreg_mode="mean"):
     elif aggreg_mode == "max":
         return torch.max(losses)
     elif aggreg_mode == "adamine":
-        nb_not_neg = max(len(losses[losses > 0.]), 1.0)
-        return losses.sum() / nb_not_neg
+        return _adamine(losses)
 
     raise NotImplementedError("Unknown aggreg mode {}.".format(aggreg_mode))
+
+
+def _adamine(losses):
+    nb_not_neg = max(len(torch.nonzero(losses)), 1.0)
+    return losses.sum() / nb_not_neg

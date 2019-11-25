@@ -27,6 +27,9 @@ def residual_attention_distillation(
     collapse_channels=True,
     preprocess="square",
     normalize=True,
+    memory_flags=None,
+    only_old=False,
+    aggreg=False,
     **kwargs
 ):
     """Residual attention distillation between several attention maps between
@@ -51,10 +54,16 @@ def residual_attention_distillation(
         depth_weights = torch.tensor(list(range(len(list_attentions_a)))) + 1
         depth_weights = F.normalize(depth_weights.float(), dim=0).to(list_attentions_a[0].device)
 
-    loss = 0.
+    loss = torch.tensor(0.).to(list_attentions_a[0].device)
     for i, (a, b) in enumerate(zip(list_attentions_a, list_attentions_b)):
         # shape of (b, n, w, h)
         assert a.shape == b.shape
+
+        if only_old:
+            a = a[memory_flags]
+            b = b[memory_flags]
+            if len(a) == 0:
+                continue
 
         if preprocess == "square":
             a = torch.pow(a, 2)
@@ -80,7 +89,10 @@ def residual_attention_distillation(
             a = F.normalize(a, dim=1, p=2)
             b = F.normalize(b, dim=1, p=2)
 
-        layer_loss = torch.frobenius_norm(a - b)
+        if not aggreg:
+            layer_loss = torch.frobenius_norm(a - b)
+        elif aggreg == "mean":
+            layer_loss = torch.mean(torch.frobenius_norm(a - b, dim=-1))
         if use_depth_weights:
             layer_loss = depth_weights[i] * layer_loss
         loss += layer_loss
@@ -118,3 +130,40 @@ def relative_teacher_distances(features_a, features_b, normalize=False, distance
     pairwise_distances_b = torch.pdist(features_b, p=p)
 
     return torch.mean(torch.abs(pairwise_distances_a - pairwise_distances_b))
+
+
+def perceptual_features_reconstruction(list_attentions_a, list_attentions_b, factor=1.):
+    loss = 0.
+
+    for i, (a, b) in enumerate(zip(list_attentions_a, list_attentions_b)):
+        bs, c, w, h = a.shape
+
+        # a of shape (b, c, w, h) to (b, c * w * h)
+        a = a.view(bs, -1)
+        b = b.view(bs, -1)
+
+        a = F.normalize(a, p=2, dim=-1)
+        b = F.normalize(b, p=2, dim=-1)
+
+        layer_loss = (F.pairwise_distance(a, b, p=2) ** 2) / (c * w * h)
+        loss += torch.mean(layer_loss)
+
+    return factor * (loss / len(list_attentions_a))
+
+
+def perceptual_style_reconstruction(list_attentions_a, list_attentions_b, factor=1.):
+    loss = 0.
+
+    for i, (a, b) in enumerate(zip(list_attentions_a, list_attentions_b)):
+        bs, c, w, h = a.shape
+
+        a = a.view(bs, c, w * h)
+        b = b.view(bs, c, w * h)
+
+        gram_a = torch.bmm(a, a.transpose(2, 1)) / (c * w * h)
+        gram_b = torch.bmm(b, b.transpose(2, 1)) / (c * w * h)
+
+        layer_loss = torch.frobenius_norm(gram_a - gram_b, dim=(1, 2)) ** 2
+        loss += layer_loss.mean()
+
+    return factor * (loss / len(list_attentions_a))

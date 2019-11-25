@@ -104,7 +104,8 @@ def additive_margin_softmax_ce(
     focal_gamma=None,
     scale=1,
     margin=0.,
-    exclude_pos_denominator=False
+    exclude_pos_denominator=False,
+    hinge_proxynca=False
 ):
     """Compute AMS cross-entropy loss.
 
@@ -128,12 +129,15 @@ def additive_margin_softmax_ce(
 
         disable_pos = torch.zeros_like(similarities)
         disable_pos[torch.arange(len(similarities)), targets] = similarities[torch.arange(len(similarities)), targets]
-        
+
         numerator = similarities[torch.arange(similarities.shape[0]), targets]
         denominator = similarities - disable_pos
 
-        return -torch.mean(numerator - torch.log(torch.exp(denominator).sum(-1)))
-    
+        loss = -torch.mean(numerator - torch.log(torch.exp(denominator).sum(-1)))
+        if hinge_proxynca:
+            loss = torch.clamp(loss, min=0.)
+        return loss
+
     return F.cross_entropy(similarities, targets, weight=class_weights, reduction="mean")
 
 
