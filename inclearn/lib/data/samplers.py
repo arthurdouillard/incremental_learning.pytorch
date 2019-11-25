@@ -4,8 +4,44 @@ from torch.utils.data.sampler import BatchSampler
 
 class MemoryOverSampler(BatchSampler):
 
-    def __init__(self, y, memory_flags, oversample_factor=2, **kwargs):
-        pass
+    def __init__(self, y, memory_flags, batch_size=128, **kwargs):
+        self.indexes = self._oversample(y, memory_flags)
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return len(self.indexes) // self.batch_size
+
+    def __iter__(self):
+        np.random.shuffle(self.indexes)
+
+        for batch_index in range(len(self)):
+            low_index = batch_index * self.batch_size
+            high_index = (batch_index + 1) * self.batch_size
+
+            yield self.indexes[low_index:high_index].tolist()
+
+    def _oversample(self, y, memory_flags):
+        old_indexes = np.where(memory_flags == 1.)[0]
+        new_indexes = np.where(memory_flags == 0.)[0]
+
+        old, new = y[old_indexes], y[new_indexes]
+
+        old_qt = self._mean_quantity(old)
+        new_qt = self._mean_quantity(new)
+
+        assert new_qt > old_qt, (new_qt, old_qt)
+        factor = new_qt / old_qt
+
+        indexes = [np.where(memory_flags == 0)[0]]
+        for class_id in np.unique(y):
+            indexes.append(np.repeat(np.where(old == class_id)[0], factor))
+
+        indexes = np.concatenate(indexes)
+        return indexes
+
+    @staticmethod
+    def _mean_quantity(y):
+        return np.mean(np.bincount(y))
 
 
 class MultiSampler(BatchSampler):
