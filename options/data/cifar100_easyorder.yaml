@@ -1,0 +1,10 @@
+# Orders were taken from the ones randomly sampled by iCaRL.
+# Results can be very different depending on the class ordering, thus reproducing
+# results based on those of iCaRL seems a good idea, as many following papers did.
+dataset: cifar100
+order:
+  - [68, 76, 82, 48, 94, 0, 53, 56, 41, 49, 8, 20, 60, 24, 6, 17, 89, 88, 23, 43, 85, 69, 39, 71, 36, 21, 61, 34, 58, 70, 9, 51, 54, 87, 5, 1, 79, 15, 97, 16, 30, 37, 90, 14, 83, 28, 57, 66, 81, 42, 86, 47, 62, 84, 59, 12, 32, 77, 22, 7, 27, 31, 91, 26, 67, 38, 2, 95, 52, 33, 13, 63, 99, 64, 78, 92, 65, 93, 29, 96, 75, 40, 45, 80, 4, 50, 19, 10, 25, 18, 44, 98, 74, 3, 35, 11, 72, 73, 46, 55]
+
+# It's worth evaluating the algorithm with a fixed seed though, in order to
+# decorrelate the algo init & the class ordering.
+seed: [1]

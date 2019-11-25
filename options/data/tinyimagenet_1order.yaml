@@ -1,0 +1,4 @@
+dataset: tinyimagenet
+data_path: /data/douillard/tiny-imagenet-200
+
+seed: [1]

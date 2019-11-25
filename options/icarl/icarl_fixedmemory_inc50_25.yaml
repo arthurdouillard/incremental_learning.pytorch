@@ -1,10 +1,14 @@
 initial_increment: 50
 fixed_memory: True
-increment: 10
+increment: 25
 dataset: cifar100
 
 model: icarl
 convnet: rebuffi
+
+classifier_config:
+  type: fc
+  use_bias: False
 
 lr: 2.
 weight_decay: 0.00005

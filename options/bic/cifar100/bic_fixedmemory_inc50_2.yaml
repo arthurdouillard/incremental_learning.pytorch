@@ -1,0 +1,24 @@
+initial_increment: 50
+fixed_memory: True
+increment: 2
+dataset: cifar100
+validation: 0.1
+
+model: bic
+convnet: rebuffi
+
+classifier_config:
+  type: fc
+  use_bias: False
+
+temperature: 2.
+
+lr: 0.1
+weight_decay: 0.0002
+scheduling:
+  - 100
+  - 150
+  - 200
+lr_decay: 0.1
+optimizer: sgd
+epochs: 250
