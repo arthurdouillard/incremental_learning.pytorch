@@ -279,7 +279,11 @@ class ProxyNCA(CosineClassifier):
             self._scaling = ConstantScalar()
 
         if linear:
-            self.linear = nn.Linear(64, 64)
+            self.linear = nn.Sequential(
+                nn.BatchNorm1d(self.features_dim), nn.ReLU(inplace=True),
+                nn.Linear(self.features_dim, linear)
+            )
+            self.features_dim = linear
         else:
             self.linear = ConstantScalar()
 
@@ -339,10 +343,12 @@ class ProxyNCA(CosineClassifier):
             return similarities.view(-1, self.n_classes, self.proxy_per_class).mean(-1)
         elif self.merging == "softmax":
             simi_per_class = similarities.view(-1, self.n_classes, self.proxy_per_class)
-            attentions = F.softmax(self.gamma * simi_per_class, dim=-1)
+            attentions = F.softmax(self.gamma * simi_per_class, dim=-1)  # shouldn't be -gamma?
             return (simi_per_class * attentions).sum(-1)
         elif self.merging == "max":
             return similarities.view(-1, self.n_classes, self.proxy_per_class).max(-1)[0]
+        elif self.merging == "min":
+            return similarities.view(-1, self.n_classes, self.proxy_per_class).min(-1)[0]
         else:
             raise ValueError("Unknown merging for multiple centers: {}.".format(self.merging))
 

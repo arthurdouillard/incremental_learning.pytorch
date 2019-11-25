@@ -1,4 +1,5 @@
 import copy
+import logging
 
 from torch import nn
 
@@ -6,6 +7,8 @@ from inclearn.lib import factory
 
 from .classifiers import Classifier, CosineClassifier, ProxyNCA, SoftTriple
 from .postprocessors import ConstantScalar, FactorScalar, HeatedUpScalar
+
+logger = logging.getLogger(__name__)
 
 
 class BasicNet(nn.Module):
@@ -35,6 +38,7 @@ class BasicNet(nn.Module):
             self.post_processor = ConstantScalar(**postprocessor_kwargs)
         else:
             self.post_processor = None
+        logger.info("Post processor is: {}".format(self.post_processor))
 
         self.convnet = factory.get_convnet(convnet_type, **convnet_kwargs)
 
