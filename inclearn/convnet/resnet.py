@@ -104,10 +104,10 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, zero_init_residual=True, nf=16, block_relu=False, **kwargs):
+    def __init__(self, block, layers, zero_init_residual=True, nf=16, last_relu=False, **kwargs):
         super(ResNet, self).__init__()
 
-        self.block_relu = block_relu
+        self.last_relu = last_relu
         self.inplanes = nf
         self.conv1 = nn.Conv2d(3, nf, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(nf)
@@ -152,10 +152,10 @@ class ResNet(nn.Module):
         self.inplanes = planes * block.expansion
 
         for i in range(1, blocks):
-            if i == blocks - 1 and last:
+            if i == blocks - 1 or last:
                 layers.append(block(self.inplanes, planes, last_relu=False))
             else:
-                layers.append(block(self.inplanes, planes, last_relu=self.block_relu))
+                layers.append(block(self.inplanes, planes, last_relu=self.last_relu))
 
         return nn.Sequential(*layers)
 
@@ -166,9 +166,9 @@ class ResNet(nn.Module):
         x = self.maxpool(x)
 
         x_1 = self.layer1(x)
-        x_2 = self.layer2(x_1)
-        x_3 = self.layer3(x_2)
-        x_4 = self.layer4(x_3)
+        x_2 = self.layer2(self.end_relu(x_1))
+        x_3 = self.layer3(self.end_relu(x_2))
+        x_4 = self.layer4(self.end_relu(x_3))
 
         raw_features = self.end_features(x_4)
         features = self.end_features(F.relu(x_4, inplace=False))
@@ -180,6 +180,11 @@ class ResNet(nn.Module):
     def end_features(self, x):
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
+        return x
+
+    def end_relu(self, x):
+        if self.last_relu:
+            return F.relu(x)
         return x
 
 
