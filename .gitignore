@@ -1,2 +1,6 @@
 __pycache__
-results/dev/
+results/
+options/dev/
+hyperexps/*
+*/.ipynb_checkpoints/*
+notebooks/
