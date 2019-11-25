@@ -105,7 +105,7 @@ def aggregate(runs_accs):
     return means, stds
 
 
-def compute_unique_score(runs_accs, skip_first=False):
+def compute_unique_score(runs_accs, skip_first=False, first_n_steps=None):
     """Computes the average of the (average incremental) accuracies to get a
     unique score.
 
@@ -120,7 +120,10 @@ def compute_unique_score(runs_accs, skip_first=False):
 
     means = []
     for run in runs_accs:
-        means.append(sum(run[start:]) / len(run[start:]))
+        if first_n_steps:
+            means.append(sum(run[start:first_n_steps]) / len(run[start:first_n_steps]))
+        else:
+            means.append(sum(run[start:]) / len(run[start:]))
 
     mean_of_mean = sum(means) / len(means)
     if len(runs_accs) == 1:  # One run, probably a paper, don't compute std:
@@ -136,7 +139,19 @@ def get_max_label_length(results):
     return max(len(r.get("label", r["path"])) for r in results)
 
 
-def plot(results, increment, total, initial_increment=None, title="", path_to_save=None):
+def plot(
+    results,
+    increment,
+    total,
+    initial_increment=None,
+    x_ticks=None,
+    title="",
+    path_to_save=None,
+    max_acc=100,
+    min_acc=0,
+    first_n_steps=None,
+    figsize=(10, 5)
+):
     """Plotting utilities to visualize several experiments.
 
     :param results: A list of dict composed of a "path", a "label", an optional
@@ -147,17 +162,14 @@ def plot(results, increment, total, initial_increment=None, title="", path_to_sa
     :param title: Plot title.
     :param path_to_save: Optional path where to save the image.
     """
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=figsize)
 
     initial_increment = initial_increment or increment
     x = list(range(initial_increment, total + 1, increment))
 
-    max_label_length = get_max_label_length(results) + 4
-
     for result in results:
-        path = result["path"]
+        path = result.get("path", "")
         label = result.get("label", path.rstrip("/").split("/")[-1])
-        from_paper = "[paper] " if result.get("from_paper", False) else "[me]     "
         avg_inc = result.get("average_incremental", False)
         skip_first = result.get("skip_first", False)
         kwargs = result.get("kwargs", {})
@@ -165,21 +177,27 @@ def plot(results, increment, total, initial_increment=None, title="", path_to_sa
         if result.get("hidden", False):
             continue
 
-        if "*" in path:
-            path = glob.glob(path)
-        elif os.path.isdir(path):
-            path = glob.glob(os.path.join(path, "*.json"))
+        if path:
+            if "*" in path:
+                path = glob.glob(path)
+            elif os.path.isdir(path):
+                path = glob.glob(os.path.join(path, "*.json"))
 
-        runs_accs = extract(path, avg_inc=avg_inc)
+            runs_accs = extract(path, avg_inc=avg_inc)
+        else:
+            runs_accs = result["runs_accs"]
+
         means, stds = aggregate(runs_accs)
 
-        unique_score, unique_std = compute_unique_score(runs_accs, skip_first=skip_first)
+        if first_n_steps is not None:
+            x, means, stds = x[:first_n_steps], means[:first_n_steps], stds[:first_n_steps]
 
-        label = "{mode}{label}(avg: {avg}, last: {last})".format(
-            mode=from_paper,
-            label=label.ljust(max_label_length, " "),
-            avg=unique_score + unique_std,
-            last=round(means[-1], 2)
+        unique_score, unique_std = compute_unique_score(
+            runs_accs, skip_first=skip_first, first_n_steps=first_n_steps
+        )
+
+        label = "{label} ({avg})".format(
+            label=label, avg=unique_score + unique_std, last=round(means[-1], 2)
         )
 
         try:
@@ -191,15 +209,17 @@ def plot(results, increment, total, initial_increment=None, title="", path_to_sa
             print(label)
             raise
 
-    plt.legend(loc="upper right")  #, bbox_to_anchor=(2., 1.0))
+    plt.legend(loc="upper right")
     plt.xlabel("Number of classes")
     plt.ylabel("Accuracy over seen classes")
     plt.title(title)
 
-    for i in range(0, total + 1, 10):
-        plt.axhline(y=i, color='black', linestyle='dashed', linewidth=1, alpha=0.2)
-    plt.yticks(list(range(10, total + 1, 10)))
-    plt.xticks(list(range(initial_increment, initial_increment + len(x) * increment, increment)))
+    for y in range(min_acc, max_acc + 1, 10):
+        plt.axhline(y=y, color='black', linestyle='dashed', linewidth=1, alpha=0.2)
+    plt.yticks(list(range(min_acc, max_acc + 1, 10)))
+
+    x_ticks = x_ticks or increment
+    plt.xticks(list(range(initial_increment, total + 1, x_ticks)))
 
     if path_to_save:
         plt.savefig(path_to_save)
