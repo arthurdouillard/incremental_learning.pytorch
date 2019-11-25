@@ -5,7 +5,7 @@ import os
 import ray
 import yaml
 from ray import tune
-from ray.tune.analysis import ExperimentAnalysis
+from ray.tune import Analysis
 
 import inclearn
 
@@ -15,10 +15,13 @@ INCLEARN_ARGS = vars(inclearn.parser.get_parser().parse_args([]))
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("-rd", "--ray-directory")
+    parser.add_argument("-rd", "--ray-directory", default="/data/douillard/ray_results")
     parser.add_argument("-o", "--output-options")
     parser.add_argument("-t", "--tune")
     parser.add_argument("-g", "--gpus", nargs="+", default=["0"])
+    parser.add_argument("-per", "--gpu-percent", type=float, default=0.5)
+    parser.add_argument("-topn", "--topn", default=5, type=int)
+    parser.add_argument("-earlystop", default="ucir", type=str)
 
     return parser.parse_args()
 
@@ -26,8 +29,15 @@ def parse_args():
 def train_func(config, reporter):
     train_args = copy.deepcopy(INCLEARN_ARGS)
     train_args.update(config)
-    train_args["device"] = 0
-    avg_inc_acc = inclearn.train.train(train_args)[0]
+
+    train_args["device"] = [0]
+    train_args["threads"] = 2
+    train_args["logging"] = "critical"
+    train_args["no_progressbar"] = True
+
+    for i, (avg_inc_acc, last_acc, _) in enumerate(inclearn.train.train(train_args)):
+        last_acc = last_acc * 100
+
     reporter(avg_inc_acc=avg_inc_acc)
     return avg_inc_acc
 
@@ -38,8 +48,8 @@ def _get_abs_path(path):
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), path)
 
 
-def analyse_ray_dump(ray_directory):
-    ea = ExperimentAnalysis(ray_directory)
+def analyse_ray_dump(ray_directory, topn):
+    ea = Analysis(ray_directory)
     trials_dataframe = ea.dataframe()
     trials_dataframe = trials_dataframe.sort_values(by="avg_inc_acc", ascending=False)
 
@@ -59,7 +69,12 @@ def analyse_ray_dump(ray_directory):
         )
     )
     print("\nFollowed by:")
-    for i in range(1, min(4, len(trials_dataframe))):
+    if topn < 0:
+        topn = len(trials_dataframe)
+    else:
+        topn = min(topn - 1, len(trials_dataframe))
+
+    for i in range(1, topn):
         print(
             "avg_inc_acc: {} with {}.".format(
                 trials_dataframe.iloc[i][result_index],
@@ -83,7 +98,7 @@ def _get_line_results(df, row_index, mapping):
 def _convert_config(numpy_config):
     config = {}
     for k, v in numpy_config.items():
-        if all(not isinstance(v, t) for t in (str, list)):
+        if all(not isinstance(v, t) for t in (str, list, dict)):
             v = v.item()
         config[k] = v
     return config
@@ -103,7 +118,7 @@ def get_tune_config(tune_options):
         if not k.startswith("var:"):
             config[k] = v
         else:
-            config[k] = tune.grid_search(v)
+            config[k.replace("var:", "")] = tune.grid_search(v)
 
     return config
 
@@ -114,23 +129,24 @@ def main():
     set_seen_gpus(args.gpus)
 
     if args.tune is not None:
+        config = get_tune_config(args.tune)
         ray.init()
         tune.run(
             train_func,
             name=args.tune.rstrip("/").split("/")[-1],
             stop={"avg_inc_acc": 100},
-            config=get_tune_config(args.tune),
+            config=config,
             resources_per_trial={
                 "cpu": 2,
-                "gpu": 0.5
+                "gpu": args.gpu_percent
             },
-            local_dir="./ray_results"
+            local_dir=args.ray_directory
         )
 
-        args.ray_directory = os.path.join("./ray_results", args.tune.rstrip("/").split("/")[-1])
+        args.ray_directory = os.path.join(args.ray_directory, args.tune.rstrip("/").split("/")[-1])
 
     if args.ray_directory is not None:
-        best_config = analyse_ray_dump(_get_abs_path(args.ray_directory))
+        best_config = analyse_ray_dump(_get_abs_path(args.ray_directory), args.topn)
 
         if args.output_options:
             with open(args.output_options, "w+") as f:
