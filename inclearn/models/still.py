@@ -7,23 +7,20 @@ import torch
 from torch.nn import functional as F
 
 from inclearn.lib import data, factory, losses, network, utils
+from inclearn.lib.data import samplers
 from inclearn.models.icarl import ICarl
 
 logger = logging.getLogger(__name__)
 
 
-class UCIRTest(ICarl):
-    """Implements Learning a Unified Classifier Incrementally via Rebalancing
-
-    * http://openaccess.thecvf.com/content_CVPR_2019/papers/Hou_Learning_a_Unified_Classifier_Incrementally_via_Rebalancing_CVPR_2019_paper.pdf
-    """
-
+class STILL(ICarl):
     def __init__(self, args):
         self._disable_progressbar = args.get("no_progressbar", False)
 
         self._device = args["device"][0]
-        self._old_device = args["device"][-1]
+        self._multiple_devices = args["device"]
 
+        self._batch_size = args["batch_size"]
         self._opt_name = args["optimizer"]
         self._lr = args["lr"]
         self._weight_decay = args["weight_decay"]
@@ -54,9 +51,13 @@ class UCIRTest(ICarl):
         self._gor_config = args.get("gor_config", {})
 
         self._ams_config = args.get("adaptative_margin_softmax", {})
+        self._softmax_ce = args.get("softmax_ce", False)
 
         self._attention_residual_config = args.get("attention_residual", {})
         assert isinstance(self._attention_residual_config, dict), "ra need to be dict"
+
+        self._perceptual_features = args.get("perceptual_features")
+        self._perceptual_style = args.get("perceptual_style")
 
         self._use_teacher_confidence = args.get("teacher_confidence", False)
 
@@ -166,7 +167,7 @@ class UCIRTest(ICarl):
         else:
             self._saved_network = None
 
-        if self._finetuning_config:
+        if self._finetuning_config and self._task != 0:
             logger.info("Fine-tuning")
             if self._finetuning_config["scaling"]:
                 logger.info(
@@ -174,10 +175,18 @@ class UCIRTest(ICarl):
                 )
                 self._post_processing_type = self._finetuning_config["scaling"]
 
-            self._data_memory, self._targets_memory, _, _ = self.build_examplars(
-                self.inc_dataset, self._herding_indexes
-            )
-            loader = self.inc_dataset.get_memory_loader(*self.get_memory())
+            if self._finetuning_config["sampling"] == "undersampling":
+                self._data_memory, self._targets_memory, _, _ = self.build_examplars(
+                    self.inc_dataset, self._herding_indexes
+                )
+                loader = self.inc_dataset.get_memory_loader(*self.get_memory())
+            elif self._finetuning_config["sampling"] == "oversampling":
+                _, loader = self.inc_dataset.get_custom_loader(
+                    list(range(self._n_classes - self._task_size, self._n_classes)),
+                    memory=self.get_memory(),
+                    mode="train",
+                    sampler=samplers.MemoryOverSampler
+                )
 
             if self._finetuning_config["tuning"] == "all":
                 parameters = self._network.parameters()
@@ -191,7 +200,7 @@ class UCIRTest(ICarl):
                 )
 
             self._optimizer = factory.get_optimizer(
-                parameters, self._opt_name, 0.001, self.weight_decay
+                parameters, self._opt_name, self._finetuning_config["lr"], self.weight_decay
             )
             self._scheduler = None
             self._training_step(
@@ -342,14 +351,17 @@ class UCIRTest(ICarl):
             )
         elif self._evaluation_type == "knn":
             logger.debug("knn: {}.".format(self._evaluation_config))
-            loader = self.inc_dataset.get_custom_loader([], memory=self.get_memory(), mode="test")[1]
+            loader = self.inc_dataset.get_custom_loader([], memory=self.get_memory(),
+                                                        mode="test")[1]
             features, targets = utils.extract_features(self._network, loader)
 
             if self._evaluation_config["flip"]:
-                loader = self.inc_dataset.get_custom_loader([], memory=self.get_memory(), mode="flip")[1]
+                loader = self.inc_dataset.get_custom_loader(
+                    [], memory=self.get_memory(), mode="flip"
+                )[1]
                 features_flip, targets_flip = utils.extract_features(self._network, loader)
-                features = torch.cat((features, features_flip))
-                targets = torch.cat((targets, targets_flip))
+                features = np.concatenate((features, features_flip))
+                targets = np.concatenate((targets, targets_flip))
 
             features_test, targets_test = utils.extract_features(self._network, test_loader)
 
@@ -492,10 +504,7 @@ class UCIRTest(ICarl):
 
         if self._old_model is not None:
             with torch.no_grad():
-                old_features, old_logits, old_atts = self._old_model(inputs.to(self._old_device))
-                old_features = old_features.to(self._device)
-                old_logits = old_logits.to(self._device)
-                old_atts = [a.to(self._device) for a in old_atts]
+                old_features, old_logits, old_atts = self._old_model(inputs)
 
             if self._compressed_memory and len(self._compressed_data) > 0:
                 old_features = torch.cat((old_features, c_f))
@@ -541,6 +550,9 @@ class UCIRTest(ICarl):
 
             self._metrics["tri"] += loss.item()
             self._metrics["violated"] += percent_violated
+        elif self._softmax_ce:
+            loss = F.cross_entropy(scaled_logits, targets)
+            self._metrics["cce"] += loss.item()
         else:
             if self._use_teacher_confidence and self._old_model is not None:
                 loss = losses.cross_entropy_teacher_confidence(
@@ -613,7 +625,7 @@ class UCIRTest(ICarl):
                 if self._old_model else None,
                 **self._double_margin_reg
             )
-            self._metrics["dm_reg"] += dm_reg.item()
+            self._metrics["dmr"] += dm_reg.item()
             loss += dm_reg
 
         # --------------------
@@ -677,10 +689,27 @@ class UCIRTest(ICarl):
                     factor = self._attention_residual_config.get("factor", 1.)
 
                 attention_loss = factor * losses.residual_attention_distillation(
-                    old_atts, atts, **self._attention_residual_config
+                    old_atts,
+                    atts,
+                    memory_flags=memory_flags.bool(),
+                    **self._attention_residual_config
                 )
                 loss += attention_loss
                 self._metrics["att"] += attention_loss.item()
+
+            if self._perceptual_features:
+                percep_feat = losses.perceptual_features_reconstruction(
+                    old_atts, atts, **self._perceptual_features
+                )
+                loss += percep_feat
+                self._metrics["p_feat"] += percep_feat.item()
+
+            if self._perceptual_style:
+                percep_style = losses.perceptual_style_reconstruction(
+                    old_atts, atts, **self._perceptual_style
+                )
+                loss += percep_style
+                self._metrics["p_sty"] += percep_style.item()
 
         if self._rotations_config:
             rotations_loss = losses.unsupervised_rotations(

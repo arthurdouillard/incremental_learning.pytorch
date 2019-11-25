@@ -4,7 +4,8 @@ import torch
 from torch import optim
 
 from inclearn import models
-from inclearn.convnet import (densenet, my_resnet, my_resnet2, my_resnet_brn, resnet, ucir_resnet)
+from inclearn.convnet import (densenet, my_resnet, my_resnet2, my_resnet_brn,
+                              resnet, ucir_resnet)
 from inclearn.lib import data, schedulers
 
 
@@ -63,8 +64,8 @@ def get_model(args):
         return models.UCIR(args)
     elif args["model"] == "test":
         return models.Test(args)
-    elif args["model"] == "ucir_test":
-        return models.UCIRTest(args)
+    elif args["model"] == "still":
+        return models.STILL(args)
 
     raise NotImplementedError("Unknown model {}.".format(args["model"]))
 
@@ -84,7 +85,8 @@ def get_data(args, class_order=None):
         sampler_config=args.get("sampler_config", {}),
         data_path=args["data_path"],
         class_order=class_order,
-        seed=args["seed"]
+        seed=args["seed"],
+        dataset_transforms=args.get("dataset_transforms", {})
     )
 
 
