@@ -1,7 +1,9 @@
-import matplotlib; matplotlib.use('Agg')
+import matplotlib
 
 from inclearn import parser
 from inclearn.train import train
+
+matplotlib.use('Agg')
 
 
 def main():
@@ -12,7 +14,8 @@ def main():
         args["seed"] = list(range(args["seed_range"][0], args["seed_range"][1] + 1))
         print("Seed range", args["seed"])
 
-    train(args)
+    for _ in train(args):  # `train` is a generator in order to be used with hyperfind.
+        pass
 
 
 if __name__ == "__main__":
