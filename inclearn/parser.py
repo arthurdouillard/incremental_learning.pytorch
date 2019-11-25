@@ -77,7 +77,7 @@ def get_parser():
                         help="Seed range going from first number to second (both included).")
     parser.add_argument("-options", "--options", nargs="+",
                         help="A list of options files.")
-    parser.add_argument("-save", "--save-model", choices=["never", "last", "task"],
+    parser.add_argument("-save", "--save-model", choices=["never", "last", "task", "first"],
                         default="never",
                         help="Save the network, either the `last` one or"
                              " each `task`'s ones.")
@@ -86,5 +86,6 @@ def get_parser():
     parser.add_argument("-resume", "--resume", default=None,
                         help="Resume from previously saved model, "
                              "must be in the format `*_task_[0-9]+\.pth`.")
+    parser.add_argument("--no-benchmark", action="store_true", default=False)
 
     return parser

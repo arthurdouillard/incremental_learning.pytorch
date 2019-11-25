@@ -66,7 +66,7 @@ def train(args):
 
 
 def _train(args, start_date, class_order, run_id):
-    _set_seed(args["seed"], args["threads"])
+    _set_seed(args["seed"], args["threads"], args["no_benchmark"])
 
     factory.set_device(args)
 
@@ -108,7 +108,7 @@ def _train(args, start_date, class_order, run_id):
             n_test_data=task_info["n_test_data"],
             n_tasks=task_info["max_task"]
         )
-        
+
         model.eval()
         model.before_task(train_loader, val_loader if val_loader else test_loader)
 
@@ -133,16 +133,27 @@ def _train(args, start_date, class_order, run_id):
 
         model.after_task(inc_dataset)
 
+        if args["label"] and (
+            args["save_model"] == "task" or
+            (args["save_model"] == "last" and task_id == inc_dataset.n_tasks - 1) or
+            (args["save_model"] == "first" and task_id == 0)
+        ):
+            meta_save_name = "meta_{}_task_{}.pth".format(run_id, task_id)
+            logger.info("Saving meta data: {}.".format(meta_save_name))
+            model.save_metadata(os.path.join(results_folder, meta_save_name))
+
         logger.info("Eval on {}->{}.".format(0, task_info["max_class"]))
-        ypred, ytrue = model.eval_task(test_loader)
-        metric_logger.log_task(ypred, ytrue)
+        ypreds, ytrue = model.eval_task(test_loader)
+        metric_logger.log_task(ypreds, ytrue)
 
         if args["label"]:
             logger.info(args["label"])
-        logger.info(
-            "Avg inc acc: {}.".format(metric_logger.last_results["incremental_accuracy"])
-        )
+        logger.info("Avg inc acc: {}.".format(metric_logger.last_results["incremental_accuracy"]))
         logger.info("Current acc: {}.".format(metric_logger.last_results["accuracy"]))
+        logger.info(
+            "Avg inc acc top5: {}.".format(metric_logger.last_results["incremental_accuracy_top5"])
+        )
+        logger.info("Current acc top5: {}.".format(metric_logger.last_results["accuracy_top5"]))
         logger.info("Forgetting: {}.".format(metric_logger.last_results["forgetting"]))
         results["results"].append(metric_logger.last_results)
 
@@ -164,13 +175,17 @@ def _train(args, start_date, class_order, run_id):
     del inc_dataset
 
 
-def _set_seed(seed, nb_threads):
+def _set_seed(seed, nb_threads, no_benchmark):
     logger.info("Set seed {}".format(seed))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True  # This will slow down training.
+    if no_benchmark:
+        logger.warning("CUDA algos are not determinists but faster!")
+    else:
+        logger.warning("CUDA algos are determinists but very slow!")
+    torch.backends.cudnn.deterministic = not no_benchmark  # This will slow down training.
     torch.set_num_threads(nb_threads)
 
 
