@@ -3,10 +3,12 @@ import copy
 import logging
 import os
 import pdb
+import pickle
 
 import numpy as np
 import torch
 from scipy.spatial.distance import cdist
+from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 
@@ -35,7 +37,7 @@ class ICarl(IncrementalLearner):
         self._disable_progressbar = args.get("no_progressbar", False)
 
         self._device = args["device"][0]
-        self._old_device = args["device"][-1]
+        self._multiple_devices = args["device"]
 
         self._opt_name = args["optimizer"]
         self._lr = args["lr"]
@@ -86,6 +88,16 @@ class ICarl(IncrementalLearner):
         self._herding_indexes = []
 
         self._epoch_metrics = collections.defaultdict(list)
+
+    def save_metadata(self, path):
+        logger.info("Saving metadata at {}.".format(path))
+        with open(path, "wb+") as f:
+            pickle.dump(self._herding_indexes, f)
+
+    def load_metadata(self, path):
+        logger.info("Loading metadata at {}.".format(path))
+        with open(path, "rb") as f:
+            self._herding_indexes = pickle.load(f)
 
     @property
     def epoch_metrics(self):
@@ -150,6 +162,12 @@ class ICarl(IncrementalLearner):
         best_epoch, best_acc = -1, -1.
         wait = 0
 
+        if len(self._multiple_devices) > 1:
+            logger.info("Duplicating model on {} gpus.".format(len(self._multiple_devices)))
+            training_network = nn.DataParallel(self._network, self._multiple_devices)
+        else:
+            training_network = self._network
+
         for epoch in range(initial_epoch, nb_epochs):
             self._metrics = collections.defaultdict(float)
 
@@ -166,7 +184,7 @@ class ICarl(IncrementalLearner):
                 memory_flags = input_dict["memory_flags"]
 
                 self._optimizer.zero_grad()
-                loss = self._forward_loss(inputs, targets, memory_flags)
+                loss = self._forward_loss(training_network, inputs, targets, memory_flags)
                 loss.backward()
                 self._optimizer.step()
 
@@ -211,7 +229,7 @@ class ICarl(IncrementalLearner):
             )
         )
 
-    def _forward_loss(self, inputs, targets, memory_flags):
+    def _forward_loss(self, training_network, inputs, targets, memory_flags):
         inputs, targets = inputs.to(self._device), targets.to(self._device)
         onehot_targets = utils.to_onehot(targets, self._n_classes).to(self._device)
 
@@ -219,7 +237,7 @@ class ICarl(IncrementalLearner):
             random_noise = torch.randn(self._random_noise_config["nb_per_batch"], *inputs.shape[1:])
             inputs = torch.cat((inputs, random_noise.to(self._device)))
 
-        logits = self._network(inputs)
+        logits = training_network(inputs)
 
         loss = self._compute_loss(inputs, logits, targets, onehot_targets, memory_flags)
 
@@ -235,7 +253,7 @@ class ICarl(IncrementalLearner):
             inc_dataset, self._herding_indexes
         )
 
-        self._old_model = self._network.copy().freeze().to(self._old_device)
+        self._old_model = self._network.copy().freeze().to(self._device)
 
         self._network.on_task_end()
         self.plot_tsne()
@@ -249,9 +267,8 @@ class ICarl(IncrementalLearner):
             )
 
     def _eval_task(self, data_loader):
-        ypred, ytrue = self.compute_accuracy(self._network, data_loader, self._class_means)
-
-        return ypred, ytrue
+        ypreds, ytrue = self.compute_accuracy(self._network, data_loader, self._class_means)
+        return ypreds, ytrue
 
     # -----------
     # Private API
@@ -261,8 +278,7 @@ class ICarl(IncrementalLearner):
         if self._old_model is None:
             loss = F.binary_cross_entropy_with_logits(logits, onehot_targets)
         else:
-            old_targets = torch.sigmoid(self._old_model(inputs.to(self._old_device)).detach()
-                                       ).to(self._device)
+            old_targets = torch.sigmoid(self._old_model(inputs).detach())
 
             new_targets = onehot_targets.clone()
             new_targets[..., :-self._task_size] = old_targets
@@ -334,7 +350,7 @@ class ICarl(IncrementalLearner):
         herding_indexes = copy.deepcopy(herding_indexes)
 
         data_memory, targets_memory = [], []
-        class_means = np.zeros((100, self._network.features_dim))
+        class_means = np.zeros((self._n_classes, self._network.features_dim))
 
         for class_idx in range(self._n_classes):
             # We extract the features, both normal and flipped:
@@ -410,4 +426,4 @@ class ICarl(IncrementalLearner):
         sqd = cdist(class_means, features, 'sqeuclidean')
         score_icarl = (-sqd).T
 
-        return np.argsort(score_icarl, axis=1)[:, -1], targets_
+        return score_icarl, targets_

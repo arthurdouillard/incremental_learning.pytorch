@@ -72,8 +72,10 @@ class BiC(ICarl):
             if self._task > 0:
                 logits = self._bic(logits)
 
+            logits = logits.detach()
+
             ytrue.append(input_dict["targets"].numpy())
-            ypred.append(torch.softmax(logits, dim=1).argmax(dim=1).cpu().numpy())
+            ypred.append(torch.softmax(logits, dim=1).cpu().numpy())
 
         ytrue = np.concatenate(ytrue)
         ypred = np.concatenate(ypred)
