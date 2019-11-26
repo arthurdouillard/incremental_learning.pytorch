@@ -63,6 +63,7 @@ def train(args):
             round(last_acc * 100, 2), round(forgetting * 100, 2)
         )
     )
+    logger.info("Individual results: {}".format([round(100 * acc, 2) for acc in avg_inc_accs])
 
 
 def _train(args, start_date, class_order, run_id):
