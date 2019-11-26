@@ -11,7 +11,7 @@ join:
 	docker exec -it inclearn_${USER}${SUFFIX} ${SHELLNAME}
 
 jupy:
-	jupyter-notebook --ip="*" --no-browser --allow-root
+	jupyter-notebook --no-browser --allow-root --port=8891
 
 tests:
 	pytest -p no:cacheprovider tests/
