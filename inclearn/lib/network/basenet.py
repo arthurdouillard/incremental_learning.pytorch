@@ -100,19 +100,18 @@ class BasicNet(nn.Module):
         selected_outputs = outputs[0] if self.classifier_no_act else outputs[1]
         logits = self.classifier(self.dropout(selected_outputs))
 
+        outputs = {"logits": logits}
+
         if self.return_features:
-            to_return = []
             if self.extract_no_act:
-                to_return.append(outputs[0])
+                outputs["features"] = outputs[0]
             else:
-                to_return.append(outputs[1])
+                outputs["features"] =  outputs[1]
 
-            to_return.append(logits)
             if self.attention_hook:
-                to_return.append(outputs[2])
+                outputs["attention_maps"] = outputs[2]
 
-            return to_return
-        return logits
+        return outputs
 
     def post_process(self, x):
         if self.post_processor is None:

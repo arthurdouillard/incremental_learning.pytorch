@@ -351,8 +351,8 @@ class STILL(ICarl):
         else:
             self._class_weights = None
 
-    def _compute_loss(self, inputs, features_logits, targets, onehot_targets, memory_flags):
-        features, logits, atts = features_logits
+    def _compute_loss(self, inputs, outputs, targets, onehot_targets, memory_flags):
+        features, logits, atts = outputs["features"], outputs["logits"], outputs["attention_maps"]
 
         if self._post_processing_type is None:
             scaled_logits = self._network.post_process(logits)
@@ -361,7 +361,9 @@ class STILL(ICarl):
 
         if self._old_model is not None:
             with torch.no_grad():
-                old_features, old_logits, old_atts = self._old_model(inputs)
+                old_outputs = self._old_model(inputs)
+                old_features = old_outputs["features"]
+                old_atts = old_outputs["attention_maps"]
 
         if self._ams_config:
             ams_config = copy.deepcopy(self._ams_config)

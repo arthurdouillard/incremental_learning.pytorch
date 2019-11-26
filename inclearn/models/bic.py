@@ -82,11 +82,14 @@ class BiC(ICarl):
 
         return ypred, ytrue
 
-    def _compute_loss(self, inputs, logits, targets, onehot_targets, memory_flags):
+    def _compute_loss(self, inputs, outputs, targets, onehot_targets, memory_flags):
+        logits = outputs["logits"]
+
         loss = F.cross_entropy(logits, targets)
 
         if self._old_model is not None:
-            old_targets = self._old_model.post_process(self._old_model(inputs)).detach()
+            with torch.no_grad():
+                old_targets = self._old_model.post_process(self._old_model(inputs)["logits"])
 
             loss += F.binary_cross_entropy_with_logits(
                 logits[..., :-self._task_size] / self._temperature,

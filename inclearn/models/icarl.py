@@ -233,9 +233,9 @@ class ICarl(IncrementalLearner):
         inputs, targets = inputs.to(self._device), targets.to(self._device)
         onehot_targets = utils.to_onehot(targets, self._n_classes).to(self._device)
 
-        logits = training_network(inputs)
+        outputs = training_network(inputs)
 
-        loss = self._compute_loss(inputs, logits, targets, onehot_targets, memory_flags)
+        loss = self._compute_loss(inputs, outputs, targets, onehot_targets, memory_flags)
 
         if not utils._check_loss(loss):
             pdb.set_trace()
@@ -270,11 +270,14 @@ class ICarl(IncrementalLearner):
     # Private API
     # -----------
 
-    def _compute_loss(self, inputs, logits, targets, onehot_targets, memory_flags):
+    def _compute_loss(self, inputs, outputs, targets, onehot_targets, memory_flags):
+        logits = outputs["logits"]
+
         if self._old_model is None:
             loss = F.binary_cross_entropy_with_logits(logits, onehot_targets)
         else:
-            old_targets = torch.sigmoid(self._old_model(inputs).detach())
+            with torch.no_grad():
+                old_targets = torch.sigmoid(self._old_model(inputs)["outputs"])
 
             new_targets = onehot_targets.clone()
             new_targets[..., :-self._task_size] = old_targets
