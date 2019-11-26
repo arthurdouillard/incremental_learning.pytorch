@@ -233,10 +233,6 @@ class ICarl(IncrementalLearner):
         inputs, targets = inputs.to(self._device), targets.to(self._device)
         onehot_targets = utils.to_onehot(targets, self._n_classes).to(self._device)
 
-        if self._random_noise_config:
-            random_noise = torch.randn(self._random_noise_config["nb_per_batch"], *inputs.shape[1:])
-            inputs = torch.cat((inputs, random_noise.to(self._device)))
-
         logits = training_network(inputs)
 
         loss = self._compute_loss(inputs, logits, targets, onehot_targets, memory_flags)

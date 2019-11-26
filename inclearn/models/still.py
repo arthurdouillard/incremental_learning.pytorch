@@ -39,14 +39,10 @@ class STILL(ICarl):
         self._herding_selection = args.get("herding_selection", "icarl")
         self._n_classes = 0
 
-        self._use_mimic_score = args.get("mimic_score", False)
         self._less_forget_config = args.get("less_forget", {})
         assert isinstance(self._less_forget_config, dict)
 
         self._lambda_schedule = args.get("lambda_schedule", False)
-        self._ranking_loss = args.get("ranking_loss", {})
-
-        self._relative_teachers_config = args.get("relative_teachers", {})
 
         self._gor_config = args.get("gor_config", {})
 
@@ -54,12 +50,9 @@ class STILL(ICarl):
         self._softmax_ce = args.get("softmax_ce", False)
 
         self._attention_residual_config = args.get("attention_residual", {})
-        assert isinstance(self._attention_residual_config, dict), "ra need to be dict"
 
         self._perceptual_features = args.get("perceptual_features")
         self._perceptual_style = args.get("perceptual_style")
-
-        self._use_teacher_confidence = args.get("teacher_confidence", False)
 
         self._groupwise_factors = args.get("groupwise_factors", {})
         self._softtriple_config = args.get("softriple_regularizer", {})
@@ -78,23 +71,14 @@ class STILL(ICarl):
         self._evaluation_type = args.get("eval_type", "icarl")
         self._evaluation_config = args.get("evaluation_config", {})
 
-        self._weights_orthogonality = args.get("weights_orthogonality")
-        self._orthoreg_config = args.get("orthoreg_config", {})
-        self._dso_config = args.get("dso_config", {})
-        self._mc_config = args.get("mc_config", {})
-        self._srip_config = args.get("srip_config", {})
         self._double_margin_reg = args.get("double_margin_reg", {})
 
         self._save_model = args["save_model"]
-
-        self._harmonic_embeddings = args.get("harmonic_embeddings", {})
 
         self._rotations_config = args.get("rotations_config", {})
 
         self._eval_every_x_epochs = args.get("eval_every_x_epochs")
         self._early_stopping = args.get("early_stopping", {})
-
-        self._random_noise_config = args.get("random_noise_config", {})
 
         classifier_kwargs = args.get("classifier_config", {})
         self._network = network.BasicNet(
@@ -127,12 +111,6 @@ class STILL(ICarl):
         self._herding_compressed_indexes = []
 
         self._weight_generation = args.get("weight_generation")
-        self._compressed_memory = args.get("compressed_memory")
-        self._alternate_training_config = args.get("alternate_training")
-
-        self._compressed_data = {}
-        self._compressed_targets = {}
-        self._compressed_means = []
 
         self._saved_network = None
         self._post_processing_type = None
@@ -143,9 +121,7 @@ class STILL(ICarl):
     @property
     def _memory_per_class(self):
         """Returns the number of examplars per class."""
-        if self._compressed_memory:
-            return self._compressed_memory["quantity_images"]
-        elif self._fixed_memory:
+        if self._fixed_memory:
             return self._memory_size // self._total_n_classes
         return self._memory_size // self._n_classes
 
@@ -153,9 +129,6 @@ class STILL(ICarl):
         for p in self._network.parameters():
             if p.requires_grad:
                 p.register_hook(lambda grad: torch.clamp(grad, -5., 5.))
-
-        if self._alternate_training_config and self._task != 0:
-            return self._alternate_training(train_loader, val_loader)
 
         logger.debug("nb {}.".format(len(train_loader.dataset)))
         self._training_step(train_loader, val_loader, 0, self._n_epochs)
@@ -224,92 +197,9 @@ class STILL(ICarl):
             )
         )
 
-    def _alternate_training(self, train_loader, val_loader):
-        for phase in self._alternate_training_config:
-            if phase["update_theta"]:
-                logger.info("Updating theta")
-                for class_index in range(self._n_classes - self._task_size, self._n_classes):
-                    _, loader = self.inc_dataset.get_custom_loader([class_index])
-                    features, _ = utils.extract_features(self._network, loader)
-                    features = F.normalize(torch.from_numpy(features), p=2, dim=1)
-                    mean = torch.mean(features, dim=0)
-                    mean = F.normalize(mean, dim=0, p=2)
-
-                    self._network.classifier.weights.data[class_index] = mean.to(self._device)
-
-            self._network.freeze(trainable=phase["train_f"], model="convnet")
-            self._network.freeze(trainable=phase["train_theta"], model="classifier")
-            logger.info("Freeze convnet=" + str(phase["train_f"]))
-            logger.info("Freeze classifier=" + str(phase["train_theta"]))
-
-            self._optimizer = factory.get_optimizer(
-                self._network.parameters(), self._opt_name, self._lr, self._weight_decay
-            )
-            self._training_step(train_loader, val_loader, 0, phase["nb_epochs"])
-
     def _after_task(self, inc_dataset):
         self._monitor_scale()
         super()._after_task(inc_dataset)
-
-        if self._compressed_memory:
-            self.add_compressed_memory()
-
-    def add_compressed_memory(self):
-        _, _, self._herding_compressed_indexes, _ = self.build_examplars(
-            self.inc_dataset, self._herding_compressed_indexes, self.quantity_compressed_embeddings
-        )
-
-        # Computing the embeddings of only the current task images:
-        for class_index in range(self._n_classes - self._task_size, self._n_classes):
-            _, loader = self.inc_dataset.get_custom_loader([class_index])
-            features, targets = utils.extract_features(self._network, loader)
-
-            selected_features = features[self._herding_compressed_indexes[class_index]]
-            selected_targets = targets[self._herding_compressed_indexes[class_index]]
-
-            self._compressed_means.append(np.mean(selected_features, axis=0))
-
-            self._compressed_data[class_index] = selected_features
-            self._compressed_targets[class_index] = selected_targets
-
-        logger.info(
-            "{} compressed memory, or {} per class.".format(
-                sum(len(x) for x in self._compressed_data.values()),
-                self.quantity_compressed_embeddings
-            )
-        )
-
-        # Taking in account the mean shift of the class:
-        if self._compressed_memory["mean_shift"]:
-            logger.info("Computing mean shift")
-            for class_index in range(self._n_classes - self._task_size):
-                class_memory, class_targets = utils.select_class_samples(
-                    self._data_memory, self._targets_memory, class_index
-                )
-
-                _, loader = self.inc_dataset.get_custom_loader(
-                    [], memory=((class_memory, class_targets))
-                )
-                features, _ = utils.extract_features(self._network, loader)
-                features_mean = np.mean(features, axis=0)
-
-                diff_mean = features_mean - self._compressed_means[class_index]
-
-                self._compressed_data[class_index] += diff_mean
-
-        for class_index in range(self._n_classes):
-            indexes = np.random.permutation(self.quantity_compressed_embeddings)
-            self._compressed_data[class_index] = self._compressed_data[class_index][indexes]
-
-    @property
-    def quantity_compressed_embeddings(self):
-        assert self._compressed_memory
-
-        embed_size = 64 * 16
-        image_size = 32 * 32 * 3 * 8
-        total_mem = image_size * 20
-
-        return (total_mem - image_size * self._compressed_memory["quantity_images"]) // embed_size
 
     def _monitor_scale(self):
         if "scale" not in self._args["_logs"]:
@@ -454,10 +344,6 @@ class STILL(ICarl):
             task=self._task
         )
 
-        if self._compressed_memory:
-            self._compressed_iterator = 0
-            self._compressed_step = self.quantity_compressed_embeddings // len(train_loader)
-
         if self._class_weights_config:
             self._class_weights = torch.tensor(
                 data.get_class_weights(train_loader.dataset, **self._class_weights_config)
@@ -465,37 +351,8 @@ class STILL(ICarl):
         else:
             self._class_weights = None
 
-    def _sample_compressed(self):
-        features, logits, targets = [], [], []
-
-        low_index = self._compressed_iterator * self._compressed_step
-        self._compressed_iterator += 1
-        high_index = self._compressed_iterator * self._compressed_step
-
-        for class_index in self._compressed_data.keys():
-            f = self._compressed_data[class_index][low_index:high_index]
-            t = self._compressed_targets[class_index][low_index:high_index]
-
-            f = torch.tensor(f).to(self._device)
-            t = torch.tensor(t).to(self._device)
-
-            logits.append(self._network.classifier(f))
-            features.append(f)
-            targets.append(t)
-
-        return torch.cat(features), torch.cat(logits), torch.cat(targets)
-
     def _compute_loss(self, inputs, features_logits, targets, onehot_targets, memory_flags):
         features, logits, atts = features_logits
-
-        if self._random_noise_config:
-            logits = logits[:-self._random_noise_config["nb_per_batch"]]
-
-        if self._compressed_memory and len(self._compressed_data) > 0:
-            c_f, c_l, c_t = self._sample_compressed()
-            features = torch.cat((features, c_f))
-            logits = torch.cat((logits, c_l))
-            targets = torch.cat((targets, c_t))
 
         if self._post_processing_type is None:
             scaled_logits = self._network.post_process(logits)
@@ -505,13 +362,6 @@ class STILL(ICarl):
         if self._old_model is not None:
             with torch.no_grad():
                 old_features, old_logits, old_atts = self._old_model(inputs)
-
-            if self._compressed_memory and len(self._compressed_data) > 0:
-                old_features = torch.cat((old_features, c_f))
-                old_logits = torch.cat((old_logits, self._old_model.classifier(c_f)))
-
-            if self._random_noise_config:
-                old_logits = old_logits[:-self._random_noise_config["nb_per_batch"]]
 
         if self._ams_config:
             ams_config = copy.deepcopy(self._ams_config)
@@ -526,54 +376,13 @@ class STILL(ICarl):
                 **ams_config
             )
             self._metrics["ams"] += loss.item()
-        elif self._use_npair:
-            loss = losses.n_pair_loss(logits, targets)
-            self._metrics["npair"] += loss.item()
-        elif self._proxy_nca_config:
-            if self._network.post_processor:
-                self._proxy_nca_config["s"] = self._network.post_processor.factor
-
-            loss = losses.proxy_nca_github(
-                scaled_logits, targets, self._n_classes, **self._proxy_nca_config
-            )
-            self._metrics["nca"] += loss.item()
-        elif self._triplet_config:
-            loss, percent_violated = losses.triplet_loss(
-                features,
-                targets,
-                **self._triplet_config,
-                harmonic_embeddings=self._harmonic_embeddings,
-                old_features=old_features if self._old_model else None,
-                memory_flags=memory_flags,
-                epoch_percent=self._epoch_percent
-            )
-
-            self._metrics["tri"] += loss.item()
-            self._metrics["violated"] += percent_violated
         elif self._softmax_ce:
             loss = F.cross_entropy(scaled_logits, targets)
             self._metrics["cce"] += loss.item()
-        else:
-            if self._use_teacher_confidence and self._old_model is not None:
-                loss = losses.cross_entropy_teacher_confidence(
-                    scaled_logits, targets, F.softmax(old_logits, dim=1), memory_flags
-                )
-                self._metrics["clf_conf"] += loss.item()
-            else:
-                loss = F.cross_entropy(scaled_logits, targets)
-                self._metrics["clf"] += loss.item()
 
         # ----------------------
         # Regularization losses:
         # ----------------------
-
-        if self._weights_orthogonality is not None:
-            margin = self._weights_orthogonality.get("margin")
-            ortho_loss = losses.weights_orthogonality(
-                self._network.classifier.weights, margin=margin
-            )
-            loss += ortho_loss
-            self._metrics["ortho"] += ortho_loss.item()
 
         if self._gor_config:
             gor_loss = losses.global_orthogonal_regularization(
@@ -581,34 +390,6 @@ class STILL(ICarl):
             )
             self._metrics["gor"] += gor_loss.item()
             loss += gor_loss
-
-        if self._orthoreg_config:
-            orthoreg_loss = losses.ortho_reg(
-                self._network.classifier.weights, self._orthoreg_config
-            )
-            self._metrics["orthoreg"] += orthoreg_loss.item()
-            loss += orthoreg_loss
-
-        if self._dso_config:
-            dso_loss = losses.double_soft_orthoreg(
-                self._network.classifier.weights, self._dso_config
-            )
-            self._metrics["dso"] += dso_loss.item()
-            loss += dso_loss
-
-        if self._mc_config:
-            mc_loss = losses.mutual_coherence_regularization(
-                self._network.classifier.weights, self._mc_config
-            )
-            self._metrics["mc"] += mc_loss.item()
-            loss += mc_loss
-
-        if self._srip_config:
-            srip_loss = losses.spectral_restricted_isometry_property_regularization(
-                self._network.classifier.weights, self._srip_config
-            )
-            self._metrics["srip"] += srip_loss.item()
-            loss += srip_loss
 
         if self._softtriple_config:
             st_reg = losses.softriple_regularizer(
@@ -644,41 +425,6 @@ class STILL(ICarl):
                 distil_loss = factor * losses.embeddings_similarity(old_features, features)
                 loss += distil_loss
                 self._metrics["lf"] += distil_loss.item()
-            elif self._use_mimic_score:
-                old_class_logits = logits[..., :self._n_classes - self._task_size]
-                old_class_old_logits = old_logits[..., :self._n_classes - self._task_size]
-
-                mimic_loss = F.mse_loss(old_class_logits, old_class_old_logits)
-                mimic_loss *= (self._n_classes - self._task_size)
-                loss += mimic_loss
-                self._metrics["mimic"] += mimic_loss.item()
-
-            if self._ranking_loss:
-                ranking_loss = self._ranking_loss["factor"] * losses.ucir_ranking(
-                    logits,
-                    targets,
-                    self._n_classes,
-                    self._task_size,
-                    nb_negatives=self._ranking_loss["nb_negatives"],
-                    margin=self._ranking_loss["margin"]
-                )
-                loss += ranking_loss
-                self._metrics["rank"] += ranking_loss.item()
-
-            if self._relative_teachers_config:
-                if self._relative_teachers_config["select"] == "old":
-                    indexes_old = memory_flags.eq(1.)
-                    old_features_memory = old_features[indexes_old]
-                    new_features_memory = features[indexes_old]
-                else:
-                    old_features_memory = old_features
-                    new_features_memory = features
-
-                relative_t_loss = losses.relative_teacher_distances(
-                    old_features_memory, new_features_memory, **self._relative_teachers_config
-                )
-                loss += self._relative_teachers_config["factor"] * relative_t_loss
-                self._metrics["rel"] += relative_t_loss.item()
 
             if self._attention_residual_config:
                 if self._attention_residual_config.get("scheduled_factor", False):
