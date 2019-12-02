@@ -34,6 +34,11 @@ class iCIFAR10(DataHandler):
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
     ]
 
+    def set_custom_transforms(self, transforms):
+        if not transforms.get("color_jitter"):
+            logger.info("Not using color jitter.")
+            self.train_transforms.pop(-1)
+
 
 class iCIFAR100(iCIFAR10):
     base_dataset = datasets.cifar.CIFAR100
@@ -150,7 +155,9 @@ class TinyImageNet200(DataHandler):
             self.train_transforms.pop(-1)
         if transforms_dict.get("crop"):
             logger.info("Crop with padding of {}".format(transforms_dict.get("crop")))
-            self.train_transforms[0] = transforms.RandomCrop(64, padding=transforms_dict.get("crop"))
+            self.train_transforms[0] = transforms.RandomCrop(
+                64, padding=transforms_dict.get("crop")
+            )
 
     def base_dataset(self, data_path, train=True, download=False):
         if train:
@@ -180,9 +187,7 @@ class TinyImageNet200(DataHandler):
             class_name: class_id
             for class_id, class_name in enumerate(os.listdir(os.path.join(data_path, "train")))
         }
-        self.id2classes = {
-            v: k for k, v in self.classes2id.items()
-        }
+        self.id2classes = {v: k for k, v in self.classes2id.items()}
 
         with open(os.path.join(data_path, "val", "val_annotations.txt")) as f:
             for line in f:
