@@ -16,6 +16,8 @@ def get_optimizer(params, optimizer, lr, weight_decay=0.0):
         return optim.AdamW(params, lr=lr, weight_decay=weight_decay)
     elif optimizer == "sgd":
         return optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.9)
+    elif optimizer == "sgd_nesterov":
+        return optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.9, nesterov=True)
 
     raise NotImplementedError
 
@@ -44,30 +46,27 @@ def get_convnet(convnet_type, **kwargs):
 
 
 def get_model(args):
-    if args["model"] == "icarl":
-        return models.ICarl(args)
-    elif args["model"] == "lwf":
-        return models.LwF(args)
-    elif args["model"] == "e2e":
-        return models.End2End(args)
-    elif args["model"] == "medic":
-        return models.Medic(args)
-    elif args["model"] == "focusforget":
-        return models.FocusForget(args)
-    elif args["model"] == "fixed":
-        return models.FixedRepresentation(args)
-    elif args["model"] == "bic":
-        return models.BiC(args)
-    elif args["model"] == "icarlmixup":
-        return models.ICarlMixUp(args)
-    elif args["model"] == "ucir":
-        return models.UCIR(args)
-    elif args["model"] == "test":
-        return models.Test(args)
-    elif args["model"] == "still":
-        return models.STILL(args)
+    dict_models = {
+        "icarl": models.ICarl,
+        #"lwf": models.LwF,
+        "e2e": models.End2End,
+        #"medic": models.Medic,
+        #"fixed": models.FixedRepresentation,
+        "oracle": None,
+        "bic": models.BiC,
+        "ucir": models.UCIR,
+        "still": models.STILL,
+        "lwm": models.LwM
+    }
 
-    raise NotImplementedError("Unknown model {}.".format(args["model"]))
+    model = args["model"].lower()
+
+    if model not in dict_models:
+        raise NotImplementedError(
+            "Unknown model {}, must be among {}.".format(args["model"], list(dict_models.keys()))
+        )
+
+    return dict_models[model](args)
 
 
 def get_data(args, class_order=None):
