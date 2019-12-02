@@ -1,7 +1,11 @@
 import abc
 import logging
 
+import torch
+
 LOGGER = logging.Logger("IncLearn", level="INFO")
+
+logger = logging.getLogger(__name__)
 
 
 class IncrementalLearner(abc.ABC):
@@ -17,7 +21,7 @@ class IncrementalLearner(abc.ABC):
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        self._network = None
 
     def set_task_info(self, task, total_n_classes, increment, n_train_data, n_test_data, n_tasks):
         self._task = task
@@ -53,12 +57,6 @@ class IncrementalLearner(abc.ABC):
     def get_val_memory(self):
         return None
 
-    def eval(self):
-        raise NotImplementedError
-
-    def train(self):
-        raise NotImplementedError
-
     def _before_task(self, data_loader, val_loader):
         pass
 
@@ -88,3 +86,24 @@ class IncrementalLearner(abc.ABC):
     @inc_dataset.setter
     def inc_dataset(self, inc_dataset):
         self.__inc_dataset = inc_dataset
+
+    @property
+    def network(self):
+        return self._network
+
+    @network.setter
+    def network(self, network_path):
+        if self._network is not None:
+            del self._network
+
+        logger.info("Loading model from {}.".format(network_path))
+        self._network = torch.load(network_path)
+        self._network.to(self._device)
+        self._network.device = self._device
+        self._network.classifier.device = self._device
+
+    def eval(self):
+        self._network.eval()
+
+    def train(self):
+        self._network.train()

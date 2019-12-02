@@ -103,27 +103,6 @@ class ICarl(IncrementalLearner):
     def epoch_metrics(self):
         return dict(self._epoch_metrics)
 
-    def eval(self):
-        self._network.eval()
-
-    def train(self):
-        self._network.train()
-
-    @property
-    def network(self):
-        return self._network
-
-    @network.setter
-    def network(self, network_path):
-        if self._network is not None:
-            del self._network
-
-        logger.info("Loading model from {}.".format(network_path))
-        self._network = torch.load(network_path)
-        self._network.to(self._device)
-        self._network.device = self._device
-        self._network.classifier.device = self._device
-
     # ----------
     # Public API
     # ----------
@@ -252,7 +231,7 @@ class ICarl(IncrementalLearner):
         self._old_model = self._network.copy().freeze().to(self._device)
 
         self._network.on_task_end()
-        self.plot_tsne()
+        #self.plot_tsne()
 
     def plot_tsne(self):
         if self.folder_result:

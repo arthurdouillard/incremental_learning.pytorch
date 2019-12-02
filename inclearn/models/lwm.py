@@ -45,21 +45,6 @@ class LwM(IncrementalLearner):
         self._n_classes = 0
         self._old_model = None
 
-    @property
-    def network(self):
-        return self._network
-
-    @network.setter
-    def network(self, network_path):
-        if self._network is not None:
-            del self._network
-
-    def eval(self):
-        self._network.eval()
-
-    def train(self):
-        self._network.train()
-
     def _before_task(self, data_loader, val_loader):
         self._n_classes += self._task_size
         self._network.add_classes(self._task_size)
