@@ -17,7 +17,7 @@ def to_onehot(targets, n_classes):
     return onehot
 
 
-def _check_loss(loss):
+def check_loss(loss):
     return not bool(torch.isnan(loss).item()) and bool((loss >= 0.).item())
 
 
@@ -168,8 +168,9 @@ def apply_kmeans(features, targets, nb_clusters, pre_normalization):
     return np.concatenate(new_features), np.concatenate(new_targets)
 
 
-def apply_knn(features, targets, features_test, targets_test, nb_neighbors, normalize=True,
-              weights="uniform"):
+def apply_knn(
+    features, targets, features_test, targets_test, nb_neighbors, normalize=True, weights="uniform"
+):
     print(
         "KNN with {} neighbors and pre-normalized features: {}, weights: {}.".format(
             nb_neighbors, normalize, weights

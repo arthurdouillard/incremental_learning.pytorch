@@ -237,7 +237,7 @@ class ICarl(IncrementalLearner):
 
         loss = self._compute_loss(inputs, outputs, targets, onehot_targets, memory_flags)
 
-        if not utils._check_loss(loss):
+        if not utils.check_loss(loss):
             pdb.set_trace()
 
         self._metrics["loss"] += loss.item()
