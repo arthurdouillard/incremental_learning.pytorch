@@ -261,7 +261,11 @@ class CifarResNet(nn.Module):
 
         return Stage(layers, block_relu=self.last_relu)
 
-    def forward(self, x, attention_hook=False):
+    @property
+    def last_conv(self):
+        return self.stage_4.conv_b
+
+    def forward(self, x):
         x = self.conv_1_3x3(x)
         x = F.relu(self.bn_1(x), inplace=True)
 
@@ -278,9 +282,11 @@ class CifarResNet(nn.Module):
         else:
             attentions = [feats_s1[-1], feats_s2[-1], feats_s3[-1], x]
 
-        if attention_hook:
-            return raw_features, features, attentions
-        return raw_features, features
+        return {
+            "raw_features": raw_features,
+            "features": features,
+            "attention": attentions
+        }
 
     def end_features(self, x):
         x = self.pool(x)

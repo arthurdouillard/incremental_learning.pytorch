@@ -159,7 +159,11 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x, attention_hook=False):
+    @property
+    def last_conv(self):
+        return self.layer4[-1].conv2
+
+    def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -173,9 +177,11 @@ class ResNet(nn.Module):
         raw_features = self.end_features(x_4)
         features = self.end_features(F.relu(x_4, inplace=False))
 
-        if attention_hook:
-            return raw_features, features, [x_1, x_2, x_3, x_4]
-        return raw_features, features
+        return {
+            "raw_features": raw_features,
+            "features": features,
+            "attention": [x_1, x_2, x_3, x_4]
+        }
 
     def end_features(self, x):
         x = self.avgpool(x)
