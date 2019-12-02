@@ -19,8 +19,7 @@ class IncrementalLearner(abc.ABC):
     def __init__(self, *args, **kwargs):
         pass
 
-    def set_task_info(self, task, total_n_classes, increment, n_train_data, n_test_data,
-                      n_tasks):
+    def set_task_info(self, task, total_n_classes, increment, n_train_data, n_test_data, n_tasks):
         self._task = task
         self._task_size = increment
         self._total_n_classes = total_n_classes
@@ -60,7 +59,7 @@ class IncrementalLearner(abc.ABC):
     def train(self):
         raise NotImplementedError
 
-    def _before_task(self, data_loader):
+    def _before_task(self, data_loader, val_loader):
         pass
 
     def _train_task(self, train_loader, val_loader):
@@ -71,6 +70,12 @@ class IncrementalLearner(abc.ABC):
 
     def _eval_task(self, data_loader):
         raise NotImplementedError
+
+    def save_metadata(self, path):
+        pass
+
+    def load_metadata(self, path):
+        pass
 
     @property
     def _new_task_index(self):
