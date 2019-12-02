@@ -2,114 +2,116 @@ import logging
 
 import numpy as np
 import torch
-from torch import nn
 from torch.nn import functional as F
-from tqdm import trange
 
-from inclearn import factory, utils
-from inclearn.models.base import IncrementalLearner
+from inclearn.lib import factory, loops, network, utils
+from inclearn.models import IncrementalLearner
 
-LOGGER = logging.Logger("IncLearn", level="INFO")
+logger = logging.getLogger(__name__)
 
 
 class FixedRepresentation(IncrementalLearner):
-    """Base incremental learner.
-
-    Methods are called in this order (& repeated for each new task):
-
-    1. set_task_info
-    2. before_task
-    3. train_task
-    4. after_task
-    5. eval_task
-    """
 
     def __init__(self, args):
-        super().__init__()
+        self._device = args["device"][0]
+        self._multiple_devices = args["device"]
 
-        self._epochs = 70
+        self._opt_name = args["optimizer"]
+        self._lr = args["lr"]
+        self._lr_decay = args["lr_decay"]
+        self._weight_decay = args["weight_decay"]
+        self._n_epochs = args["epochs"]
+        self._scheduling = args["scheduling"]
 
-        self._n_classes = args["increment"]
-        self._device = args["device"]
+        logger.info("Initializing FixedRepresentation")
 
-        self._features_extractor = factory.get_resnet(args["convnet"], nf=64,
-                                                      zero_init_residual=True)
+        self._network = network.BasicNet(
+            args["convnet"],
+            convnet_kwargs=args.get("convnet_config", {}),
+            classifier_kwargs=args.get(
+                "classifier_config", {
+                    "type": "fc",
+                    "use_bias": True,
+                    "use_multi_fc": True
+                }
+            ),
+            device=self._device
+        )
 
-        self._classifiers = [nn.Linear(self._features_extractor.out_dim, self._n_classes, bias=False).to(self._device)]
-        torch.nn.init.kaiming_normal_(self._classifiers[0].weight)
-        self.add_module("clf_" + str(self._n_classes), self._classifiers[0])
-
-        self.to(self._device)
-
-    def forward(self, x):
-        feats = self._features_extractor(x)
-
-        logits = []
-        for clf in self._classifiers:
-            logits.append(clf(feats))
-
-        return torch.cat(logits, dim=1)
+        self._n_classes = 0
+        self._old_model = None
 
     def _before_task(self, data_loader, val_loader):
-        if self._task != 0:
-            self._add_n_classes(self._task_size)
+        self._n_classes += self._task_size
+        self._network.add_classes(self._task_size)
 
         self._optimizer = factory.get_optimizer(
-            filter(lambda x: x.requires_grad, self.parameters()),
-            "sgd", 0.1)
-        self._scheduler = torch.optim.lr_scheduler.MultiStepLR(self._optimizer, [50, 60], gamma=0.2)
-
-    def _get_params(self):
-        return [self._features_extractor.parameters()]
+            self._network.classifier.classifier[-1].parameters(), self._opt_name, self._lr,
+            self._weight_decay
+        )
+        if self._scheduling is None:
+            self._scheduler = None
+        else:
+            self._scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                self._optimizer, self._scheduling, gamma=self._lr_decay
+            )
 
     def _train_task(self, train_loader, val_loader):
-        for _ in trange(self._epochs):
-            self._scheduler.step()
-            for _, inputs, targets in train_loader:
-                self._optimizer.zero_grad()
+        loops.single_loop(
+            train_loader,
+            val_loader,
+            self._multiple_devices,
+            self._network,
+            self._n_epochs,
+            self._optimizer,
+            scheduler=self._scheduler,
+            train_function=self._forward_loss,
+            eval_function=self._accuracy,
+            task=self._task,
+            n_tasks=self._n_tasks
+        )
 
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
-
-                logits = self.forward(inputs)
-                loss = F.cross_entropy(logits, targets)
-                loss.backward()
-                self._optimizer.step()
-
-    def _after_task(self, data_loader):
-        pass
+    def _after_task(self, inc_dataset):
+        self._old_model = self._network.copy().freeze().eval().to(self._device)
+        self._network.on_task_end()
 
     def _eval_task(self, loader):
-        ypred = []
-        ytrue = []
+        ypred, ytrue = [], []
 
-        for _, inputs, targets in loader:
-            inputs = inputs.to(self._device)
-            logits = self.forward(inputs)
-            preds = logits.argmax(dim=1).cpu().numpy()
+        for input_dict in loader:
+            with torch.no_grad():
+                logits = self._network(input_dict["inputs"].to(self._device))["logits"]
 
-            ypred.extend(preds)
-            ytrue.extend(targets)
+            ytrue.append(input_dict["targets"].numpy())
+            ypred.append(torch.softmax(logits, dim=1).cpu().numpy())
 
-        ypred, ytrue = np.array(ypred), np.array(ytrue)
-        print(np.bincount(ypred))
+        ytrue = np.concatenate(ytrue)
+        ypred = np.concatenate(ypred)
+
         return ypred, ytrue
 
-    def _add_n_classes(self, n):
-        self._n_classes += n
+    def _accuracy(self, loader):
+        ypred, ytrue = self._eval_task(loader)
+        ypred = ypred.argmax(dim=1)
 
-        self._classifiers.append(nn.Linear(
-            self._features_extractor.out_dim, self._task_size,
-            bias=False
-        ).to(self._device))
-        nn.init.kaiming_normal_(self._classifiers[-1].weight)
-        self.add_module("clf_" + str(self._n_classes), self._classifiers[-1])
+        return 100 * round(np.mean(ypred == ytrue), 3)
 
-        for param in self._features_extractor.parameters():
-            param.requires_grad = False
+    def _forward_loss(self, training_network, inputs, targets, memory_flags, metrics):
+        inputs, targets = inputs.to(self._device), targets.to(self._device)
+        onehot_targets = utils.to_onehot(targets, self._n_classes).to(self._device)
 
-        for clf in self._classifiers[:-1]:
-            for param in clf.parameters():
-                param.requires_grad = False
-        for param in self._classifiers[-1].parameters():
-            for param in clf.parameters():
-                param.requires_grad = True
+        outputs = training_network(inputs)
+
+        loss = self._compute_loss(inputs, outputs, targets, onehot_targets, memory_flags, metrics)
+
+        if not utils.check_loss(loss):
+            raise ValueError("Loss became invalid ({}).".format(loss))
+
+        metrics["loss"] += loss.item()
+
+        return loss
+
+    def _compute_loss(self, inputs, outputs, targets, onehot_targets, memory_flags, metrics):
+        logits = outputs["logits"]
+
+        return F.cross_entropy(logits, targets)
