@@ -26,6 +26,7 @@ class BasicNet(nn.Module):
         classifier_no_act=False,
         attention_hook=False,
         rotations_predictor=False,
+        gradcam_hook=False,
         dropout=0.
     ):
         super(BasicNet, self).__init__()
@@ -74,12 +75,17 @@ class BasicNet(nn.Module):
         self.extract_no_act = extract_no_act
         self.classifier_no_act = classifier_no_act
         self.attention_hook = attention_hook
+        self.gradcam_hook = gradcam_hook
         self.device = device
 
+        if self.gradcam_hook:
+            self._hooks = [None, None]
+            logger.info("Setting gradcam hook for gradients + activations of last conv.")
+            self.set_gradcam_hook()
         if self.extract_no_act:
-            print("Features will be extracted without the last ReLU.")
+            logger.info("Features will be extracted without the last ReLU.")
         if self.classifier_no_act:
-            print("No ReLU will be applied on features before feeding the classifier.")
+            logger.info("No ReLU will be applied on features before feeding the classifier.")
 
         self.to(self.device)
 
@@ -96,20 +102,19 @@ class BasicNet(nn.Module):
             self.post_processor.on_epoch_end()
 
     def forward(self, x):
-        outputs = self.convnet(x, attention_hook=self.attention_hook)
-        selected_outputs = outputs[0] if self.classifier_no_act else outputs[1]
-        logits = self.classifier(self.dropout(selected_outputs))
+        outputs = self.convnet(x)
 
-        outputs = {"logits": logits}
+        if self.classifier_no_act:
+            selected_features = outputs["raw_features"]
+        else:
+            selected_features = outputs["features"]
+        logits = self.classifier(self.dropout(selected_features))
 
-        if self.return_features:
-            if self.extract_no_act:
-                outputs["features"] = outputs[0]
-            else:
-                outputs["features"] =  outputs[1]
+        outputs["logits"] = logits
 
-            if self.attention_hook:
-                outputs["attention_maps"] = outputs[2]
+        if self.gradcam_hook:
+            outputs["gradcam_gradients"] = self._gradcam_gradients
+            outputs["gradcam_activations"] = self._gradcam_activations
 
         return outputs
 
@@ -135,10 +140,10 @@ class BasicNet(nn.Module):
             self.classifier.add_custom_weights(weights)
 
     def extract(self, x):
-        raw_features, features = self.convnet(x)
+        outputs = self.convnet(x)
         if self.extract_no_act:
-            return raw_features
-        return features
+            return outputs["raw_features"]
+        return outputs["features"]
 
     def predict_rotations(self, inputs):
         if self.rotations_predictor is None:
@@ -160,6 +165,9 @@ class BasicNet(nn.Module):
 
         for param in model.parameters():
             param.requires_grad = trainable
+        if self.gradcam_hook and model == "convnet":
+            for param in self.convnet.last_conv.parameters():
+                param.requires_grad = True
 
         if not trainable:
             model.eval()
@@ -185,3 +193,24 @@ class BasicNet(nn.Module):
     @property
     def n_classes(self):
         return self.classifier.n_classes
+
+    def unset_gradcam_hook(self):
+        self._hooks[0].remove()
+        self._hooks[1].remove()
+        self._hooks[0] = None
+        self._hooks[1] = None
+        self._gradcam_gradients, self._gradcam_activations = [None], [None]
+
+    def set_gradcam_hook(self):
+        self._gradcam_gradients, self._gradcam_activations = [None], [None]
+
+        def backward_hook(module, grad_input, grad_output):
+            self._gradcam_gradients[0] = grad_output[0]
+            return None
+
+        def forward_hook(module, input, output):
+            self._gradcam_activations[0] = output
+            return None
+
+        self._hooks[0] = self.convnet.last_conv.register_backward_hook(backward_hook)
+        self._hooks[1] = self.convnet.last_conv.register_forward_hook(forward_hook)

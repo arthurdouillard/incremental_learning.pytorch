@@ -1,6 +1,8 @@
 import torch
 from torch.nn import functional as F
 
+from inclearn.lib import vizualization
+
 
 def mer_loss(new_logits, old_logits):
     """Distillation loss that is less important if the new model is unconfident.
@@ -145,7 +147,7 @@ def perceptual_features_reconstruction(list_attentions_a, list_attentions_b, fac
         a = F.normalize(a, p=2, dim=-1)
         b = F.normalize(b, p=2, dim=-1)
 
-        layer_loss = (F.pairwise_distance(a, b, p=2) ** 2) / (c * w * h)
+        layer_loss = (F.pairwise_distance(a, b, p=2)**2) / (c * w * h)
         loss += torch.mean(layer_loss)
 
     return factor * (loss / len(list_attentions_a))
@@ -163,7 +165,37 @@ def perceptual_style_reconstruction(list_attentions_a, list_attentions_b, factor
         gram_a = torch.bmm(a, a.transpose(2, 1)) / (c * w * h)
         gram_b = torch.bmm(b, b.transpose(2, 1)) / (c * w * h)
 
-        layer_loss = torch.frobenius_norm(gram_a - gram_b, dim=(1, 2)) ** 2
+        layer_loss = torch.frobenius_norm(gram_a - gram_b, dim=(1, 2))**2
         loss += layer_loss.mean()
 
     return factor * (loss / len(list_attentions_a))
+
+
+def gradcam_distillation(gradients_a, gradients_b, activations_a, activations_b, factor=1):
+    """Distillation loss between gradcam-generated attentions of two models.
+
+    References:
+        * Dhar et al.
+          Learning without Memorizing
+          CVPR 2019
+
+    :param base_logits: [description]
+    :param list_attentions_a: [description]
+    :param list_attentions_b: [description]
+    :param factor: [description], defaults to 1
+    :return: [description]
+    """
+    attentions_a = gradients_a * activations_a
+    attentions_b = gradients_b * activations_b
+
+    assert len(attentions_a.shape) == len(attentions_b.shape) == 4
+    assert attentions_a.shape == attentions_b.shape
+
+    batch_size = attentions_a.shape[0]
+
+    flat_attention_a = F.normalize(attentions_a.view(batch_size, -1), p=2, dim=-1)
+    flat_attention_b = F.normalize(attentions_b.view(batch_size, -1), p=2, dim=-1)
+
+    distances = F.pairwise_distance(flat_attention_a, flat_attention_b, p=1)
+
+    return factor * torch.mean(distances)
