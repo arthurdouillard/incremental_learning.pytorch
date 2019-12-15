@@ -1,5 +1,7 @@
 # Incremental Learning
 
+**This repository is not up to date with my local version, when I'll have finished working on my paper, I'll update this repo.**
+
 *Also called lifelong learning, or continual learning.*
 
 This repository will store all my implementations of Incremental Learning's papers.
