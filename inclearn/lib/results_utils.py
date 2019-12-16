@@ -167,7 +167,10 @@ def plot(results, increment, total, title="", path_to_save=None):
         )
 
         try:
-            plt.errorbar(x, means, stds, label=label, marker="o", markersize=3, **kwargs)
+            mean_stds_sub = [i - j for i, j in zip(means, stds)]
+            mean_stds_add = [i + j for i, j in zip(means, stds)]
+            plt.plot(x, means, label=label, **kwargs)     
+            plt.fill_between(x, mean_stds_sub, mean_stds_add, alpha=0.3)        
         except Exception:
             print(x)
             print(means)
@@ -180,11 +183,11 @@ def plot(results, increment, total, title="", path_to_save=None):
     plt.ylabel("Accuracy over seen classes")
     plt.title(title)
 
-    for i in range(10, total + 1, 10):
+    for i in range(10, 100 + 1, 10):
         plt.axhline(y=i, color='black', linestyle='dashed', linewidth=1, alpha=0.2)
     plt.yticks([i for i in range(10, total + 1, 10)])
-    plt.xticks([i for i in range(10, len(x) * increment + 1, 10)])
+    plt.xticks([i for i in range(increment, len(x) * increment + 1, increment)])
 
     if path_to_save:
-        plt.savefig(path_to_save)
+        plt.savefig(path_to_save, dpi=1200)
     plt.show()
