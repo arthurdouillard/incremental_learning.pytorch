@@ -28,6 +28,7 @@ class MetricLogger:
     @property
     def last_results(self):
         return {
+            "task_id": len(self.metrics["accuracy"]) - 1,
             "accuracy": self.metrics["accuracy"][-1],
             "incremental_accuracy": self.metrics["incremental_accuracy"][-1],
             "accuracy_top5": self.metrics["accuracy_top5"][-1],
@@ -50,7 +51,10 @@ def accuracy_per_task(ypreds, ytrue, task_size=10, topk=1):
     all_acc["total"] = accuracy(ypreds, ytrue, topk=topk)
 
     if task_size is not None:
-        for class_id in range(0, np.max(ytrue), task_size):
+        for class_id in range(0, np.max(ytrue) + task_size, task_size):
+            if class_id > np.max(ytrue):
+                break
+
             idxes = np.where(np.logical_and(ytrue >= class_id, ytrue < class_id + task_size))[0]
 
             label = "{}-{}".format(

@@ -2,6 +2,7 @@ import glob
 import json
 import math
 import os
+import statistics
 
 import matplotlib.pyplot as plt
 
@@ -35,7 +36,7 @@ def save_results(results, label, model, date, run_id):
         json.dump(results, f, indent=2)
 
 
-def extract(paths, avg_inc=False):
+def extract(paths, metric="avg_inc", nb_classes=None):
     """Extract accuracy logged in the various log files.
 
     :param paths: A path or a list of paths to a json file.
@@ -46,27 +47,29 @@ def extract(paths, avg_inc=False):
     if not isinstance(paths, list):
         paths = [paths]
 
-    runs_accs = []
+    score_plot, score_tab = [], []
     for path in paths:
         with open(path) as f:
             data = json.load(f)
 
-        if isinstance(data["results"][0], dict):
-            if "total" in data["results"][0]:
-                accs = [100 * task["total"] for task in data["results"]]
-            else:
-                accs = [100 * task["accuracy"]["total"] for task in data["results"]]
-        elif isinstance(data["results"][0], float):
-            accs = [100 * task_acc for task_acc in data["results"]]
-        else:
-            raise NotImplementedError(type(data["results"][0]))
+        score_plot.append([100 * task["accuracy"]["total"] for task in data["results"]])
 
-        if avg_inc:
-            raise NotImplementedError("Deprecated")
+        if metric == "avg_inc":
+            score_tab.append(score_plot[-1])
+        elif metric == "avg_cls":
+            accs = []
+            for class_id in range(nb_classes):
+                class_accuracies = [
+                    100 * task["accuracy_per_class"]["{:02d}-{:02d}".format(class_id, class_id)]
+                    for task in data["results"]
+                    if "{:02d}-{:02d}".format(class_id, class_id) in task["accuracy_per_class"]
+                ]
+                if len(class_accuracies) > 0:
+                    accs.append(statistics.mean(class_accuracies))
 
-        runs_accs.append(accs)
+            score_tab.append(accs)
 
-    return runs_accs
+    return score_plot, score_tab
 
 
 def compute_avg_inc_acc(results):
@@ -150,7 +153,8 @@ def plot(
     max_acc=100,
     min_acc=0,
     first_n_steps=None,
-    figsize=(10, 5)
+    figsize=(10, 5),
+    metric="avg_inc"
 ):
     """Plotting utilities to visualize several experiments.
 
@@ -170,7 +174,6 @@ def plot(
     for result in results:
         path = result.get("path", "")
         label = result.get("label", path.rstrip("/").split("/")[-1])
-        avg_inc = result.get("average_incremental", False)
         skip_first = result.get("skip_first", False)
         kwargs = result.get("kwargs", {})
 
@@ -183,17 +186,18 @@ def plot(
             elif os.path.isdir(path):
                 path = glob.glob(os.path.join(path, "*.json"))
 
-            runs_accs = extract(path, avg_inc=avg_inc)
+            score_plot, score_tab = extract(path, metric=metric, nb_classes=total)
         else:
-            runs_accs = result["runs_accs"]
+            score_plot = result["runs_accs"]
+            score_tab = score_plot
 
-        means, stds = aggregate(runs_accs)
+        means, stds = aggregate(score_plot)
 
         if first_n_steps is not None:
             x, means, stds = x[:first_n_steps], means[:first_n_steps], stds[:first_n_steps]
 
         unique_score, unique_std = compute_unique_score(
-            runs_accs, skip_first=skip_first, first_n_steps=first_n_steps
+            score_tab, skip_first=skip_first, first_n_steps=first_n_steps
         )
 
         label = "{label} ({avg})".format(

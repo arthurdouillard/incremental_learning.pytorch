@@ -56,7 +56,8 @@ def get_model(args):
         "bic": models.BiC,
         "ucir": models.UCIR,
         "still": models.STILL,
-        "lwm": models.LwM
+        "lwm": models.LwM,
+        "zil": models.ZIL
     }
 
     model = args["model"].lower()
@@ -85,7 +86,8 @@ def get_data(args, class_order=None):
         data_path=args["data_path"],
         class_order=class_order,
         seed=args["seed"],
-        dataset_transforms=args.get("dataset_transforms", {})
+        dataset_transforms=args.get("dataset_transforms", {}),
+        all_test_classes=args.get("all_test_classes", False)
     )
 
 

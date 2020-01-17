@@ -5,8 +5,9 @@ from torch import nn
 
 from inclearn.lib import factory
 
-from .classifiers import Classifier, CosineClassifier, ProxyNCA, SoftTriple
-from .postprocessors import ConstantScalar, FactorScalar, HeatedUpScalar
+from .classifiers import Classifier, CosineClassifier, ProxyNCA
+from .postprocessors import FactorScalar, HeatedUpScalar
+from .word import Word2vec
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class BasicNet(nn.Module):
         convnet_kwargs={},
         classifier_kwargs={},
         postprocessor_kwargs={},
+        wordembeddings_kwargs={},
         init="kaiming",
         device=None,
         return_features=False,
@@ -26,8 +28,7 @@ class BasicNet(nn.Module):
         classifier_no_act=False,
         attention_hook=False,
         rotations_predictor=False,
-        gradcam_hook=False,
-        dropout=0.
+        gradcam_hook=False
     ):
         super(BasicNet, self).__init__()
 
@@ -35,10 +36,12 @@ class BasicNet(nn.Module):
             self.post_processor = FactorScalar(**postprocessor_kwargs)
         elif postprocessor_kwargs.get("type") == "heatedup":
             self.post_processor = HeatedUpScalar(**postprocessor_kwargs)
-        elif postprocessor_kwargs.get("type") == "constant":
-            self.post_processor = ConstantScalar(**postprocessor_kwargs)
-        else:
+        elif postprocessor_kwargs.get("type") is None:
             self.post_processor = None
+        else:
+            raise NotImplementedError(
+                "Unknown postprocessor {}.".format(postprocessor_kwargs["type"])
+            )
         logger.info("Post processor is: {}".format(self.post_processor))
 
         self.convnet = factory.get_convnet(convnet_type, **convnet_kwargs)
@@ -53,10 +56,6 @@ class BasicNet(nn.Module):
             )
         elif classifier_kwargs["type"] == "proxynca":
             self.classifier = ProxyNCA(self.convnet.out_dim, device=device, **classifier_kwargs)
-        elif classifier_kwargs["type"] == "softtriple":
-            self.classifier = SoftTriple(self.convnet.out_dim, device=device, **classifier_kwargs)
-        elif classifier_kwargs["type"] is None or classifier_kwargs["type"] == "none":
-            self.classifier = ConstantScalar()
         else:
             raise ValueError("Unknown classifier type {}.".format(classifier_kwargs["type"]))
 
@@ -66,10 +65,10 @@ class BasicNet(nn.Module):
         else:
             self.rotations_predictor = None
 
-        if dropout > 0.:
-            self.dropout = nn.Dropout2d(dropout)
+        if wordembeddings_kwargs:
+            self.word_embeddings = Word2vec(**wordembeddings_kwargs, device=device)
         else:
-            self.dropout = ConstantScalar()
+            self.word_embeddings = None
 
         self.return_features = return_features
         self.extract_no_act = extract_no_act
@@ -102,15 +101,24 @@ class BasicNet(nn.Module):
             self.post_processor.on_epoch_end()
 
     def forward(self, x):
+        if self.word_embeddings is not None and isinstance(x, list):
+            words = x[1]
+            x = x[0]
+        else:
+            words = None
+
         outputs = self.convnet(x)
+        if words is not None:  # ugly to change
+            outputs["word_embeddings"] = self.word_embeddings(words)
 
         if self.classifier_no_act:
             selected_features = outputs["raw_features"]
         else:
             selected_features = outputs["features"]
-        logits = self.classifier(self.dropout(selected_features))
+        logits, raw_logits = self.classifier(selected_features)
 
         outputs["logits"] = logits
+        outputs["raw_logits"] = raw_logits
 
         if self.gradcam_hook:
             outputs["gradcam_gradients"] = self._gradcam_gradients
@@ -176,14 +184,17 @@ class BasicNet(nn.Module):
 
         return self
 
-    @property
-    def group_parameters(self):
+    def get_group_parameters(self):
         groups = {"convnet": self.convnet.parameters()}
 
-        if isinstance(self.classifier, nn.Module):
-            groups["classifier"] = self.classifier.parameters()
+        #if isinstance(self.classifier, nn.Module):
+        #    groups["classifier"] = self.classifier.parameters()
         if isinstance(self.post_processor, FactorScalar):
             groups["postprocessing"] = self.post_processor.parameters()
+        if hasattr(self.classifier, "new_weights"):
+            groups["new_weights"] = self.classifier.new_weights
+        if hasattr(self.classifier, "old_weights"):
+            groups["old_weights"] = self.classifier.old_weights
 
         return groups
 

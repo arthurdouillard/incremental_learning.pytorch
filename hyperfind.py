@@ -1,6 +1,7 @@
 import argparse
 import copy
 import os
+import statistics
 
 import ray
 import yaml
@@ -22,6 +23,9 @@ def parse_args():
     parser.add_argument("-per", "--gpu-percent", type=float, default=0.5)
     parser.add_argument("-topn", "--topn", default=5, type=int)
     parser.add_argument("-earlystop", default="ucir", type=str)
+    parser.add_argument("-options", "--options", default=None, nargs="+")
+    parser.add_argument("-threads", default=2, type=int)
+    parser.add_argument("-resume", default=False, action="store_true")
 
     return parser.parse_args()
 
@@ -31,15 +35,17 @@ def train_func(config, reporter):
     train_args.update(config)
 
     train_args["device"] = [0]
-    train_args["threads"] = 2
-    train_args["logging"] = "critical"
+    train_args["logging"] = "warning"
     train_args["no_progressbar"] = True
 
-    for i, (avg_inc_acc, last_acc, _) in enumerate(inclearn.train.train(train_args)):
-        last_acc = last_acc * 100
+    all_acc = []
+    for i, (avg_inc_acc, last_acc, _, is_last) in enumerate(inclearn.train.train(train_args)):
+        if is_last:
+            all_acc.append(avg_inc_acc)
 
-    reporter(avg_inc_acc=avg_inc_acc)
-    return avg_inc_acc
+    total_avg_inc_acc = statistics.mean(all_acc)
+    reporter(avg_inc_acc=total_avg_inc_acc)
+    return total_avg_inc_acc
 
 
 def _get_abs_path(path):
@@ -61,6 +67,7 @@ def analyse_ray_dump(ray_directory, topn):
         elif col == "avg_inc_acc":
             result_index = index
 
+    print("Ray config: {}".format(ray_directory))
     print("Best Config:")
     print(
         "avg_inc_acc: {} with {}.".format(
@@ -90,7 +97,6 @@ def _get_line_results(df, row_index, mapping):
     for col, index in mapping.items():
         if col.startswith("var:"):
             col = col[4:]
-
         results[col] = df.iloc[row_index][index]
     return results
 
@@ -109,7 +115,7 @@ def set_seen_gpus(gpus):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpus)
 
 
-def get_tune_config(tune_options):
+def get_tune_config(tune_options, options_files):
     with open(tune_options) as f:
         options = yaml.load(f, Loader=yaml.FullLoader)
 
@@ -120,6 +126,10 @@ def get_tune_config(tune_options):
         else:
             config[k.replace("var:", "")] = tune.grid_search(v)
 
+    if options_files is not None:
+        print("Options files: {}".format(options_files))
+        config["options"] = [os.path.realpath(op) for op in options_files]
+
     return config
 
 
@@ -129,7 +139,8 @@ def main():
     set_seen_gpus(args.gpus)
 
     if args.tune is not None:
-        config = get_tune_config(args.tune)
+        config = get_tune_config(args.tune, args.options)
+        config["threads"] = args.threads
         ray.init()
         tune.run(
             train_func,
@@ -140,10 +151,14 @@ def main():
                 "cpu": 2,
                 "gpu": args.gpu_percent
             },
-            local_dir=args.ray_directory
+            local_dir=args.ray_directory,
+            resume=args.resume
         )
 
         args.ray_directory = os.path.join(args.ray_directory, args.tune.rstrip("/").split("/")[-1])
+
+    if args.tune is not None:
+        print("\n\n", args.tune, "\n\n")
 
     if args.ray_directory is not None:
         best_config = analyse_ray_dump(_get_abs_path(args.ray_directory), args.topn)

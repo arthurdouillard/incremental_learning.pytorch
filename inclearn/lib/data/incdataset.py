@@ -7,8 +7,9 @@ from PIL import Image
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from .datasets import (ImageNet100, ImageNet100UCIR, ImageNet1000,
-                       TinyImageNet200, iCIFAR10, iCIFAR100)
+from .datasets import (
+    ImageNet100, ImageNet100UCIR, ImageNet1000, TinyImageNet200, iCIFAR10, iCIFAR100
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,8 @@ class IncrementalDataset:
         sampler_config=None,
         data_path="data",
         class_order=None,
-        dataset_transforms=None
+        dataset_transforms=None,
+        all_test_classes=False,
     ):
         datasets = _get_datasets(dataset_name)
         self._setup_data(
@@ -80,6 +82,7 @@ class IncrementalDataset:
         self._onehot = onehot
         self._sampler = sampler
         self._sampler_config = sampler_config
+        self._all_test_classes = all_test_classes
 
     @property
     def n_tasks(self):
@@ -97,7 +100,13 @@ class IncrementalDataset:
         x_val, y_val = self._select(
             self.data_val, self.targets_val, low_range=min_class, high_range=max_class
         )
-        x_test, y_test = self._select(self.data_test, self.targets_test, high_range=max_class)
+        if self._all_test_classes:
+            logger.info("Testing on all classes!")
+            x_test, y_test = self._select(
+                self.data_test, self.targets_test, high_range=sum(self.increments)
+            )
+        else:
+            x_test, y_test = self._select(self.data_test, self.targets_test, high_range=max_class)
 
         if self._onehot:
 
@@ -108,12 +117,12 @@ class IncrementalDataset:
             y_train = to_onehot(y_train)
 
         if memory is not None:
-            print("Set memory of size: {}.".format(memory[0].shape[0]))
+            logger.info("Set memory of size: {}.".format(memory[0].shape[0]))
             x_train, y_train, train_memory_flags = self._add_memory(x_train, y_train, *memory)
         else:
             train_memory_flags = np.zeros((x_train.shape[0],))
         if memory_val is not None:
-            print("Set validation memory of size: {}.".format(memory_val[0].shape[0]))
+            logger.info("Set validation memory of size: {}.".format(memory_val[0].shape[0]))
             x_val, y_val, val_memory_flags = self._add_memory(x_val, y_val, *memory_val)
         else:
             val_memory_flags = np.zeros((x_val.shape[0],))
@@ -191,7 +200,7 @@ class IncrementalDataset:
             data = np.concatenate(data)
             targets = np.concatenate(targets)
 
-        if memory is not None:
+        if memory is not None or (isinstance(memory, tuple) and memory[0] is None):
             if len(data) > 0:
                 data, targets, memory_flags = self._add_memory(data, targets, *memory)
             else:
@@ -283,7 +292,7 @@ class IncrementalDataset:
             elif dataset.class_order is not None:
                 order = dataset.class_order
 
-            print("Dataset {}: class ordering: {}.".format(dataset, order))
+            logger.info("Dataset {}: class ordering: {}.".format(dataset, order))
 
             self.class_order.append(order)
 

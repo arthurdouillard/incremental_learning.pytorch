@@ -81,6 +81,8 @@ def get_parser():
                         default="never",
                         help="Save the network, either the `last` one or"
                              " each `task`'s ones.")
+    parser.add_argument("--dump-predictions", default=False, action="store_true",
+                        help="Dump the predictions and their ground-truth on disk.")
     parser.add_argument("-log", "--logging", choices=["critical", "warning", "info", "debug"],
                         default="info", help="Logging level")
     parser.add_argument("-resume", "--resume", default=None,

@@ -2,28 +2,6 @@ import torch
 from torch import nn
 
 
-class ConstantScalar(nn.Module):
-
-    def __init__(self, constant=1., bias=0., **kwargs):
-        super().__init__()
-
-        self.factor = constant
-        self.bias = bias
-
-    def on_task_end(self):
-        pass
-
-    def on_epoch_end(self):
-        pass
-
-    def forward(self, x):
-        if hasattr(self, "bias"):
-            return self.factor * x + self.bias
-        else:
-            return self.factor * x
-
-
-
 class FactorScalar(nn.Module):
 
     def __init__(self, initial_value=1., **kwargs):
@@ -39,6 +17,12 @@ class FactorScalar(nn.Module):
 
     def forward(self, inputs):
         return self.factor * inputs
+
+    def __mul__(self, other):
+        return self.forward(other)
+
+    def __rmul__(self, other):
+        return self.forward(other)
 
 
 class HeatedUpScalar(nn.Module):

@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 import torch
+from sklearn.metrics import confusion_matrix
 from torch.nn import functional as F
 
 from inclearn.lib import data, factory, losses, network, utils
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class STILL(ICarl):
+
     def __init__(self, args):
         self._disable_progressbar = args.get("no_progressbar", False)
 
@@ -36,11 +38,13 @@ class STILL(ICarl):
 
         self._memory_size = args["memory_size"]
         self._fixed_memory = args["fixed_memory"]
-        self._herding_selection = args.get("herding_selection", "icarl")
+        self._herding_selection = args.get("herding_selection", {"type": "icarl"})
         self._n_classes = 0
+        self._last_results = None
+        self._validation_percent = args.get("validation")
 
         self._less_forget_config = args.get("less_forget", {})
-        assert isinstance(self._less_forget_config, dict)
+        assert isinstance(self._less_forget_config, dict) or self._less_forget_config is None
 
         self._lambda_schedule = args.get("lambda_schedule", False)
 
@@ -50,6 +54,7 @@ class STILL(ICarl):
         self._softmax_ce = args.get("softmax_ce", False)
 
         self._attention_residual_config = args.get("attention_residual", {})
+        self._sparsify_attentions = args.get("sparsify_attentions", None)
 
         self._perceptual_features = args.get("perceptual_features")
         self._perceptual_style = args.get("perceptual_style")
@@ -72,6 +77,7 @@ class STILL(ICarl):
         self._evaluation_config = args.get("evaluation_config", {})
 
         self._double_margin_reg = args.get("double_margin_reg", {})
+        self._double_margin_features = args.get("double_margin_features", {})
 
         self._save_model = args["save_model"]
 
@@ -79,6 +85,8 @@ class STILL(ICarl):
 
         self._eval_every_x_epochs = args.get("eval_every_x_epochs")
         self._early_stopping = args.get("early_stopping", {})
+
+        self._gradcam_distil = args.get("gradcam_distil", {})
 
         classifier_kwargs = args.get("classifier_config", {})
         self._network = network.BasicNet(
@@ -92,7 +100,7 @@ class STILL(ICarl):
             classifier_no_act=args.get("classifier_no_act", True),
             attention_hook=True,
             rotations_predictor=bool(self._rotations_config),
-            dropout=args.get("dropout")
+            gradcam_hook=bool(self._gradcam_distil)
         )
 
         self._warmup_config = args.get("warmup")
@@ -114,6 +122,7 @@ class STILL(ICarl):
 
         self._saved_network = None
         self._post_processing_type = None
+        self._data_memory, self._targets_memory = None, None
 
         self._args = args
         self._args["_logs"] = {}
@@ -135,7 +144,7 @@ class STILL(ICarl):
 
         self._post_processing_type = None
 
-        if self._finetuning_config and self._finetuning_config["checkpoint"]:
+        if self._finetuning_config and self._finetuning_config.get("checkpoint", False):
             self._saved_network = self._network.copy()
         else:
             self._saved_network = None
@@ -167,6 +176,16 @@ class STILL(ICarl):
                 parameters = self._network.convnet.parameters()
             elif self._finetuning_config["tuning"] == "classifier":
                 parameters = self._network.classifier.parameters()
+            elif self._finetuning_config["tuning"] == "classifier_scale":
+                parameters = [
+                    {
+                        "params": self._network.classifier.parameters(),
+                        "lr": self._finetuning_config["lr"]
+                    }, {
+                        "params": self._network.post_processor.parameters(),
+                        "lr": self._finetuning_config["lr"]
+                    }
+                ]
             else:
                 raise NotImplementedError(
                     "Unknwown finetuning parameters {}.".format(self._finetuning_config["tuning"])
@@ -199,7 +218,19 @@ class STILL(ICarl):
 
     def _after_task(self, inc_dataset):
         self._monitor_scale()
-        super()._after_task(inc_dataset)
+        if self._gradcam_distil:
+            self._data_memory, self._targets_memory, self._herding_indexes, self._class_means = self.build_examplars(
+                inc_dataset, self._herding_indexes
+            )
+            self._network.zero_grad()
+            self._network.unset_gradcam_hook()
+            self._old_model = self._network.copy().eval().to(self._device)
+            self._network.on_task_end()
+
+            self._network.set_gradcam_hook()
+            self._old_model.set_gradcam_hook()
+        else:
+            super()._after_task(inc_dataset)
 
     def _monitor_scale(self):
         if "scale" not in self._args["_logs"]:
@@ -293,13 +324,15 @@ class STILL(ICarl):
                 ytrue.append(input_dict["targets"].numpy())
 
                 inputs = input_dict["inputs"].to(self._device)
-                logits = self._network(inputs)[1]
+                logits = self._network(inputs)["logits"].detach()
 
-                preds = logits.argmax(dim=1)
+                preds = F.softmax(logits, dim=-1)
                 ypred.append(preds.cpu().numpy())
 
             ypred = np.concatenate(ypred)
             ytrue = np.concatenate(ytrue)
+
+            self._last_results = (ypred, ytrue)
 
             return ypred, ytrue
         else:
@@ -321,15 +354,29 @@ class STILL(ICarl):
         self._n_classes += self._task_size
         logger.info("Now {} examplars per class.".format(self._memory_per_class))
 
-        if self._groupwise_factors:
+        if self._groupwise_factors and isinstance(self._groupwise_factors, dict):
             params = []
-            for group_name, group_params in self._network.group_parameters.items():
+            for group_name, group_params in self._network.get_group_parameters().items():
+                if group_params is None:
+                    continue
                 params.append(
                     {
                         "params": group_params,
                         "lr": self._lr * self._groupwise_factors.get(group_name, 1.0)
                     }
                 )
+            #import pdb; pdb.set_trace()
+        elif self._groupwise_factors == "ucir":
+            params = [
+                {
+                    "params": self._network.convnet.parameters(),
+                    "lr": self._lr
+                },
+                {
+                    "params": self._network.classifier.new_weights,
+                    "lr": self._lr
+                },
+            ]
         else:
             params = self._network.parameters()
 
@@ -360,10 +407,11 @@ class STILL(ICarl):
             scaled_logits = logits * self._post_processing_type
 
         if self._old_model is not None:
-            with torch.no_grad():
-                old_outputs = self._old_model(inputs)
-                old_features = old_outputs["raw_features"]
-                old_atts = old_outputs["attention"]
+            #with torch.no_grad():
+            self._old_model.zero_grad()
+            old_outputs = self._old_model(inputs)
+            old_features = old_outputs["raw_features"].detach()
+            old_atts = [a.detach() for a in old_outputs["attention"]]
 
         if self._ams_config:
             ams_config = copy.deepcopy(self._ams_config)
@@ -411,6 +459,23 @@ class STILL(ICarl):
             self._metrics["dmr"] += dm_reg.item()
             loss += dm_reg
 
+        if self._double_margin_features:
+            dm_feats = losses.double_margin_constrastive_regularization_features(
+                features,
+                targets,
+                proxy_per_class=self._network.classifier.proxy_per_class,
+                **self._double_margin_features
+            )
+            self._metrics["dmr_f"] += dm_feats.item()
+            loss += dm_feats
+
+        if self._sparsify_attentions:
+            spa = self._sparsify_attentions * torch.mean(
+                torch.tensor([torch.norm(a, p=1) for a in atts])
+            )
+            loss += spa
+            self._metrics["l1"] += spa.item()
+
         # --------------------
         # Distillation losses:
         # --------------------
@@ -430,7 +495,7 @@ class STILL(ICarl):
 
             if self._attention_residual_config:
                 if self._attention_residual_config.get("scheduled_factor", False):
-                    factor = self._attention_residual_config["lambda"] * math.sqrt(
+                    factor = self._attention_residual_config["scheduled_factor"] * math.sqrt(
                         self._n_classes / self._task_size
                     )
                 else:
@@ -440,6 +505,7 @@ class STILL(ICarl):
                     old_atts,
                     atts,
                     memory_flags=memory_flags.bool(),
+                    task_percent=(self._task + 1) / self._n_tasks,
                     **self._attention_residual_config
                 )
                 loss += attention_loss
@@ -458,6 +524,60 @@ class STILL(ICarl):
                 )
                 loss += percep_style
                 self._metrics["p_sty"] += percep_style.item()
+
+            if self._gradcam_distil:
+                top_logits_indexes = logits[..., :-self._task_size].argmax(dim=1)
+                try:
+                    onehot_top_logits = utils.to_onehot(
+                        top_logits_indexes, self._n_classes - self._task_size
+                    ).to(self._device)
+                except:
+                    import pdb
+                    pbd.set_trace()
+
+                old_logits = old_outputs["logits"]
+
+                logits[..., :-self._task_size].backward(
+                    gradient=onehot_top_logits, retain_graph=True
+                )
+                old_logits.backward(gradient=onehot_top_logits)
+
+                if len(outputs["gradcam_gradients"]) > 1:
+                    gradcam_gradients = torch.cat(
+                        [g.to(self._device) for g in outputs["gradcam_gradients"] if g is not None]
+                    )
+                    gradcam_activations = torch.cat(
+                        [
+                            a.to(self._device)
+                            for a in outputs["gradcam_activations"]
+                            if a is not None
+                        ]
+                    )
+                else:
+                    gradcam_gradients = outputs["gradcam_gradients"][0]
+                    gradcam_activations = outputs["gradcam_activations"][0]
+
+                if self._gradcam_distil.get("scheduled_factor", False):
+                    factor = self._gradcam_distil["scheduled_factor"] * math.sqrt(
+                        self._n_classes / self._task_size
+                    )
+                else:
+                    factor = self._gradcam_distil.get("factor", 1.)
+
+                try:
+                    attention_loss = factor * losses.gradcam_distillation(
+                        gradcam_gradients, old_outputs["gradcam_gradients"][0].detach(),
+                        gradcam_activations, old_outputs["gradcam_activations"][0].detach()
+                    )
+                except:
+                    import pdb
+                    pdb.set_trace()
+
+                self._metrics["grad"] += attention_loss.item()
+                loss += attention_loss
+
+                self._old_model.zero_grad()
+                self._network.zero_grad()
 
         if self._rotations_config:
             rotations_loss = losses.unsupervised_rotations(

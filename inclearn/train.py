@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import pickle
 import random
 import statistics
 import time
@@ -44,16 +45,18 @@ def train(args):
         orders = [None for _ in range(len(seed_list))]
 
     for i, seed in enumerate(seed_list):
+        logger.warning("Launching run {}/{}".format(i + 1, len(seed_list)))
         args["seed"] = seed
         args["device"] = device
 
         start_time = time.time()
 
         for avg_inc_acc, last_acc, forgetting in _train(args, start_date, orders[i], i):
-            yield avg_inc_acc, last_acc, forgetting
+            yield avg_inc_acc, last_acc, forgetting, False
 
         avg_inc_accs.append(avg_inc_acc)
         logger.info("Training finished in {}s.".format(int(time.time() - start_time)))
+        yield avg_inc_acc, last_acc, forgetting, True
 
     logger.info("Label was: {}".format(args["label"]))
     logger.info(
@@ -91,7 +94,7 @@ def _train(args, start_date, class_order, run_id):
         folder_results = os.path.join(
             "results", "dev", args["model"], "{}_{}".format(start_date, args["label"])
         )
-        os.makedirs(folder_results, exist_ok=True)
+        #os.makedirs(folder_results, exist_ok=True)
         model.folder_result = folder_results
     else:
         model.folder_result = None
@@ -146,6 +149,16 @@ def _train(args, start_date, class_order, run_id):
         logger.info("Eval on {}->{}.".format(0, task_info["max_class"]))
         ypreds, ytrue = model.eval_task(test_loader)
         metric_logger.log_task(ypreds, ytrue)
+
+        if args["dump_predictions"] and args["label"]:
+            os.makedirs(os.path.join(results_folder, "predictions"), exist_ok=True)
+            with open(
+                os.path.join(
+                    results_folder, "predictions",
+                    str(task_id).rjust(len(str(30)), "0") + ".pkl"
+                ), "wb+"
+            ) as f:
+                pickle.dump((ypreds, ytrue), f)
 
         if args["label"]:
             logger.info(args["label"])

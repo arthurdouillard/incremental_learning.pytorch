@@ -2,17 +2,18 @@ import collections
 import copy
 import logging
 import os
-import pdb
 import pickle
 
 import numpy as np
 import torch
 from scipy.spatial.distance import cdist
+from sklearn.metrics import confusion_matrix
 from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 
 from inclearn.lib import factory, herding, losses, network, schedulers, utils
+from inclearn.lib.network import hook
 from inclearn.models.base import IncrementalLearner
 
 EPSILON = 1e-8
@@ -56,8 +57,10 @@ class ICarl(IncrementalLearner):
 
         self._memory_size = args["memory_size"]
         self._fixed_memory = args["fixed_memory"]
-        self._herding_selection = args.get("herding_selection", "icarl")
+        self._herding_selection = args.get("herding_selection", {"type": "icarl"})
         self._n_classes = 0
+        self._last_results = None
+        self._validation_percent = args["validation"]
 
         self._rotations_config = args.get("rotations_config", {})
         self._random_noise_config = args.get("random_noise_config", {})
@@ -79,6 +82,8 @@ class ICarl(IncrementalLearner):
 
         self._examplars = {}
         self._means = None
+
+        self._data_memory, self._targets_memory = None, None
 
         self._old_model = None
 
@@ -141,9 +146,14 @@ class ICarl(IncrementalLearner):
         best_epoch, best_acc = -1, -1.
         wait = 0
 
+        grad, act = None, None
         if len(self._multiple_devices) > 1:
             logger.info("Duplicating model on {} gpus.".format(len(self._multiple_devices)))
             training_network = nn.DataParallel(self._network, self._multiple_devices)
+            if self._network.gradcam_hook:
+                grad, act, back_hook, for_hook = hook.get_gradcam_hook(training_network)
+                training_network.module.convnet.last_conv.register_backward_hook(back_hook)
+                training_network.module.convnet.last_conv.register_forward_hook(for_hook)
         else:
             training_network = self._network
 
@@ -162,8 +172,19 @@ class ICarl(IncrementalLearner):
                 inputs, targets = input_dict["inputs"], input_dict["targets"]
                 memory_flags = input_dict["memory_flags"]
 
+                if grad is not None:
+                    _clean_list(grad)
+                    _clean_list(act)
+
                 self._optimizer.zero_grad()
-                loss = self._forward_loss(training_network, inputs, targets, memory_flags)
+                loss = self._forward_loss(
+                    training_network,
+                    inputs,
+                    targets,
+                    memory_flags,
+                    gradcam_grad=grad,
+                    gradcam_act=act
+                )
                 loss.backward()
                 self._optimizer.step()
 
@@ -208,30 +229,55 @@ class ICarl(IncrementalLearner):
             )
         )
 
-    def _forward_loss(self, training_network, inputs, targets, memory_flags):
+    def _forward_loss(
+        self,
+        training_network,
+        inputs,
+        targets,
+        memory_flags,
+        gradcam_grad=None,
+        gradcam_act=None,
+        **kwargs
+    ):
         inputs, targets = inputs.to(self._device), targets.to(self._device)
         onehot_targets = utils.to_onehot(targets, self._n_classes).to(self._device)
 
         outputs = training_network(inputs)
+        if gradcam_act is not None:
+            outputs["gradcam_gradients"] = gradcam_grad
+            outputs["gradcam_activations"] = gradcam_act
 
         loss = self._compute_loss(inputs, outputs, targets, onehot_targets, memory_flags)
 
         if not utils.check_loss(loss):
-            pdb.set_trace()
+            raise ValueError("A loss is NaN: {}".format(self._metrics))
 
         self._metrics["loss"] += loss.item()
 
         return loss
 
     def _after_task(self, inc_dataset):
+        if self._herding_selection["type"] == "confusion":
+            self._compute_confusion_matrix()
+
         self._data_memory, self._targets_memory, self._herding_indexes, self._class_means = self.build_examplars(
             inc_dataset, self._herding_indexes
         )
-
         self._old_model = self._network.copy().freeze().to(self._device)
 
         self._network.on_task_end()
         #self.plot_tsne()
+
+    def _compute_confusion_matrix(self):
+        use_validation = self._validation_percent > 0.
+        _, loader = self.inc_dataset.get_custom_loader(
+            list(range(self._n_classes - self._task_size, self._n_classes)),
+            memory=self.get_val_memory() if use_validation else self.get_memory(),
+            mode="test",
+            data_source="val" if use_validation else "train"
+        )
+        ypreds, ytrue = self._eval_task(loader)
+        self._last_results = (ypreds, ytrue)
 
     def plot_tsne(self):
         if self.folder_result:
@@ -243,6 +289,7 @@ class ICarl(IncrementalLearner):
 
     def _eval_task(self, data_loader):
         ypreds, ytrue = self.compute_accuracy(self._network, data_loader, self._class_means)
+
         return ypreds, ytrue
 
     # -----------
@@ -271,43 +318,6 @@ class ICarl(IncrementalLearner):
             self._metrics["rot"] += rotations_loss.item()
 
         return loss
-
-    def _compute_predictions(self, data_loader):
-        preds = torch.zeros(self._n_train_data, self._n_classes, device=self._device)
-
-        for idxes, inputs, _ in data_loader:
-            inputs = inputs.to(self._device)
-            idxes = idxes[1].to(self._device)
-
-            preds[idxes] = self._network(inputs).detach()
-
-        return torch.sigmoid(preds)
-
-    def _classify(self, data_loader):
-        if self._means is None:
-            raise ValueError(
-                "Cannot classify without built examplar means,"
-                " Have you forgotten to call `before_task`?"
-            )
-        if self._means.shape[0] != self._n_classes:
-            raise ValueError(
-                "The number of examplar means ({}) is inconsistent".format(self._means.shape[0]) +
-                " with the number of classes ({}).".format(self._n_classes)
-            )
-
-        ypred = []
-        ytrue = []
-
-        for _, inputs, targets in data_loader:
-            inputs = inputs.to(self._device)
-
-            features = self._network.extract(inputs).detach()
-            preds = self._get_closest(self._means, F.normalize(features))
-
-            ypred.extend(preds)
-            ytrue.extend(targets)
-
-        return np.array(ypred), np.array(ytrue)
 
     @property
     def _memory_per_class(self):
@@ -343,12 +353,23 @@ class ICarl(IncrementalLearner):
 
             if class_idx >= self._n_classes - self._task_size:
                 # New class, selecting the examplars:
-                if self._herding_selection == "icarl":
+                if self._herding_selection["type"] == "icarl":
                     selected_indexes = herding.icarl_selection(features, memory_per_class)
-                elif self._herding_selection == "closest":
+                elif self._herding_selection["type"] == "closest":
                     selected_indexes = herding.closest_to_mean(features, memory_per_class)
-                elif self._herding_selection == "random":
-                    selected_indexes = np.random.permutation(len(features))[:memory_per_class]
+                elif self._herding_selection["type"] == "random":
+                    selected_indexes = herding.random(features, memory_per_class)
+                elif self._herding_selection["type"] == "kmeans":
+                    selected_indexes = herding.kmeans(
+                        features, memory_per_class, k=self._herding_selection["k"]
+                    )
+                elif self._herding_selection["confusion"]:
+                    selected_indexes = herding.confusion(
+                        *self._last_results,
+                        memory_per_class,
+                        class_id=class_idx,
+                        minimize_confusion=self._herding_selection["minimize_confusion"]
+                    )
                 else:
                     raise ValueError(
                         "Unknown herding selection {}.".format(self._herding_selection)
@@ -405,3 +426,8 @@ class ICarl(IncrementalLearner):
         score_icarl = (-sqd).T
 
         return score_icarl, targets_
+
+
+def _clean_list(l):
+    for i in range(len(l)):
+        l[i] = None

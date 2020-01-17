@@ -104,11 +104,24 @@ class LwM(IncrementalLearner):
 
         return 100 * round(np.mean(ypred == ytrue), 3)
 
-    def _forward_loss(self, training_network, inputs, targets, memory_flags, metrics):
+    def _forward_loss(
+        self,
+        training_network,
+        inputs,
+        targets,
+        memory_flags,
+        metrics,
+        gradcam_grad=None,
+        gradcam_act=None,
+        **kwargs
+    ):
         inputs, targets = inputs.to(self._device), targets.to(self._device)
         onehot_targets = utils.to_onehot(targets, self._n_classes).to(self._device)
 
         outputs = training_network(inputs)
+        if gradcam_act is not None:
+            outputs["gradcam_gradients"] = gradcam_grad
+            outputs["gradcam_activations"] = gradcam_act
 
         loss = self._compute_loss(inputs, outputs, targets, onehot_targets, memory_flags, metrics)
 
@@ -152,16 +165,25 @@ class LwM(IncrementalLearner):
                 ).to(self._device)
 
                 logits[..., :-self._task_size].backward(
-                    gradient=onehot_top_logits, retain_graph=True, create_graph=True
+                    gradient=onehot_top_logits, retain_graph=True
                 )
-                old_logits.backward(
-                    gradient=onehot_top_logits, retain_graph=True, create_graph=True
-                )
+                old_logits.backward(gradient=onehot_top_logits)
+
+                if len(outputs["gradcam_gradients"]) > 1:
+                    gradcam_gradients = torch.cat(
+                        [g.to(self._device) for g in outputs["gradcam_gradients"]]
+                    )
+                    gradcam_activations = torch.cat(
+                        [a.to(self._device) for a in outputs["gradcam_activations"]]
+                    )
+                else:
+                    gradcam_gradients = outputs["gradcam_gradients"][0]
+                    gradcam_activations = outputs["gradcam_activations"][0]
 
                 attention_loss = losses.gradcam_distillation(
-                    outputs["gradcam_gradients"][0], old_outputs["gradcam_gradients"][0].detach(),
-                    outputs["gradcam_activations"][0],
-                    old_outputs["gradcam_activations"][0].detach(), **self._attention_config
+                    gradcam_gradients, old_outputs["gradcam_gradients"][0].detach(),
+                    gradcam_activations, old_outputs["gradcam_activations"][0].detach(),
+                    **self._attention_config
                 )
                 metrics["ad"] += attention_loss.item()
                 loss += attention_loss

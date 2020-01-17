@@ -1,13 +1,17 @@
 import copy
+import logging
 
 import torch
 from sklearn.cluster import KMeans
 from torch import nn
 from torch.nn import functional as F
 
+from inclearn.lib import distance as distance_lib
 from inclearn.lib import utils
 
-from .postprocessors import ConstantScalar, FactorScalar, HeatedUpScalar
+from .postprocessors import FactorScalar, HeatedUpScalar
+
+logger = logging.getLogger(__name__)
 
 
 class Classifier(nn.Module):
@@ -45,7 +49,7 @@ class Classifier(nn.Module):
         else:
             logits = self.classifier(features)
 
-        return logits
+        return logits, None
 
     def add_classes(self, n_classes):
         if self.use_multi_fc:
@@ -95,58 +99,299 @@ class CosineClassifier(nn.Module):
         features_dim,
         device,
         *,
-        use_bias=False,
         proxy_per_class=1,
-        bn_normalize=False,
-        freeze_bn=False,
-        type=None
+        distance="cosine",
+        merging="softmax",
+        scaling=1.,
+        gamma=1.,
+        use_bias=False,
+        type=None,
     ):
         super().__init__()
 
         self.n_classes = 0
-        self.weights = None
+        self._weights = nn.ParameterList([])
         self.bias = None
-        self.use_bias = use_bias
         self.features_dim = features_dim
         self.proxy_per_class = proxy_per_class
         self.device = device
+        self.distance = distance
+        self.merging = merging
+        self.gamma = gamma
 
-        if bn_normalize:
-            print("Normalizing with BN.")
-            self.bn = nn.BatchNorm1d(features_dim, affine=False)
+        if isinstance(scaling, int):
+            self.scaling = scaling
         else:
-            self.bn = None
+            self.scaling = FactorScalar(1.)
 
         if proxy_per_class > 1:
-            print("Using {} proxies per class.".format(proxy_per_class))
+            logger.info("Using {} proxies per class.".format(proxy_per_class))
 
-        self.freeze_bn = freeze_bn
         self._task_idx = 0
 
     def on_task_end(self):
         self._task_idx += 1
+        if isinstance(self.scaling, nn.Module):
+            self.scaling.on_task_end()
 
     def on_epoch_end(self):
-        pass
+        if isinstance(self.scaling, nn.Module):
+            self.scaling.on_epoch_end()
 
     def forward(self, features):
-        if self.bn:
-            if self.freeze_bn and self._task_idx > 0 and self.bn.training:
-                self.bn.eval()
-            features_norm = self.bn(features)
-            if self.use_bias:
-                features_norm = features_norm
+        if self.distance == "cosine":
+            raw_similarities = distance_lib.cosine_similarity(features, self.weights)
+        elif self.distance == "stable_cosine_distance":
+            features = self.scaling * F.normalize(features, p=2, dim=-1)
+            weights = self.scaling * F.normalize(self.weights, p=2, dim=-1)
+
+            raw_similarities = distance_lib.stable_cosine_distance(features, weights)
+        elif self.distance == "neg_stable_cosine_distance":
+            features = self.scaling * F.normalize(features, p=2, dim=-1)
+            weights = self.scaling * F.normalize(self.weights, p=2, dim=-1)
+
+            raw_similarities = -distance_lib.stable_cosine_distance(features, weights)
+        elif self.distance == "prelu_stable_cosine_distance":
+            features = self.scaling * F.normalize(F.relu(features), p=2, dim=-1)
+            weights = self.scaling * F.normalize(self.weights, p=2, dim=-1)
+
+            raw_similarities = distance_lib.stable_cosine_distance(features, weights)
         else:
-            features_norm = features / (features.norm(dim=1)[:, None] + 1e-8)
+            raise NotImplementedError("Unknown distance function {}.".format(self.distance))
 
-        weights_norm = self.weights / (self.weights.norm(dim=1)[:, None] + 1e-8)
+        if self.proxy_per_class > 1:
+            similarities = self._reduce_proxies(raw_similarities)
+        else:
+            similarities = raw_similarities
 
-        similarities = torch.mm(features_norm, weights_norm.transpose(0, 1))
+        return similarities, raw_similarities
 
-        if self.use_bias:
-            similarities += self.bias
+    def _reduce_proxies(self, similarities):
+        # shape (batch_size, n_classes * proxy_per_class)
+        assert similarities.shape[1] == self.n_classes * self.proxy_per_class
 
-        return similarities
+        if self.merging == "mean":
+            return similarities.view(-1, self.n_classes, self.proxy_per_class).mean(-1)
+        elif self.merging == "softmax":
+            simi_per_class = similarities.view(-1, self.n_classes, self.proxy_per_class)
+            attentions = F.softmax(self.gamma * simi_per_class, dim=-1)  # shouldn't be -gamma?
+            return (simi_per_class * attentions).sum(-1)
+        elif self.merging == "max":
+            return similarities.view(-1, self.n_classes, self.proxy_per_class).max(-1)[0]
+        elif self.merging == "min":
+            return similarities.view(-1, self.n_classes, self.proxy_per_class).min(-1)[0]
+        else:
+            raise ValueError("Unknown merging for multiple centers: {}.".format(self.merging))
+
+    # ------------------
+    # Weights management
+    # ------------------
+
+    @property
+    def weights(self):
+        return torch.cat([clf for clf in self._weights])
+
+    @property
+    def new_weights(self):
+        return self._weights[-1]
+
+    @property
+    def old_weights(self):
+        if len(self._weights) > 1:
+            return self._weights[:-1]
+        return None
+
+    def add_classes(self, n_classes):
+        new_weights = nn.Parameter(torch.zeros(self.proxy_per_class * n_classes, self.features_dim))
+        nn.init.kaiming_normal_(new_weights, nonlinearity="linear")
+
+        self._weights.append(new_weights)
+
+        self.to(self.device)
+        self.n_classes += n_classes
+        return self
+
+    def add_imprinted_classes(
+        self, class_indexes, inc_dataset, network, multi_class_diff="normal", type=None
+    ):
+        if self.proxy_per_class > 1:
+            logger.info("Multi class diff {}.".format(multi_class_diff))
+
+        weights_norm = self.weights.data.norm(dim=1, keepdim=True)
+        avg_weights_norm = torch.mean(weights_norm, dim=0).cpu()
+
+        new_weights = []
+        for class_index in class_indexes:
+            _, loader = inc_dataset.get_custom_loader([class_index])
+            features, _ = utils.extract_features(network, loader)
+
+            features_normalized = F.normalize(torch.from_numpy(features), p=2, dim=1)
+            class_embeddings = torch.mean(features_normalized, dim=0)
+            class_embeddings = F.normalize(class_embeddings, dim=0, p=2)
+
+            if self.proxy_per_class == 1:
+                new_weights.append(class_embeddings * avg_weights_norm)
+            else:
+                if multi_class_diff == "normal":
+                    std = torch.std(features_normalized, dim=0)
+                    for _ in range(self.proxy_per_class):
+                        new_weights.append(torch.normal(class_embeddings, std) * avg_weights_norm)
+                elif multi_class_diff == "kmeans":
+                    clusterizer = KMeans(n_clusters=self.proxy_per_class)
+                    clusterizer.fit(features_normalized.numpy())
+
+                    for center in clusterizer.cluster_centers_:
+                        new_weights.append(torch.tensor(center) * avg_weights_norm)
+                else:
+                    raise ValueError(
+                        "Unknown multi class differentiation for imprinted weights: {}.".
+                        format(multi_class_diff)
+                    )
+
+        new_weights = torch.stack(new_weights)
+        self._weights.append(nn.Parameter(new_weights))
+
+        self.to(self.device)
+        self.n_classes += len(class_indexes)
+
+        return self
+
+
+class ProxyNCA(CosineClassifier):
+    __slots__ = ("weights",)
+
+    def __init__(
+        self,
+        *args,
+        use_scaling=False,
+        pre_relu=False,
+        linear_end_relu=False,
+        linear=False,
+        mulfactor=3,
+        gamma=1,
+        merging="mean",
+        metric="custom_distance",
+        square_dist=True,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        if use_scaling is True:
+            self._scaling = FactorScalar(1.)
+        elif use_scaling == "heatedup":
+            self._scaling = HeatedUpScalar(16, 4, 6)
+        elif isinstance(use_scaling, float):
+            self._scaling = lambda x: use_scaling * x
+        else:
+            self._scaling = lambda x: x
+
+        self.use_bias = False
+        if linear:
+            self.linear = nn.Sequential(
+                nn.BatchNorm1d(self.features_dim), nn.ReLU(inplace=True),
+                nn.Linear(self.features_dim, linear)
+            )
+            self.features_dim = linear
+        else:
+            self.linear = lambda x: x
+
+        self.square_dist = square_dist
+        self.gamma = gamma
+        self.metric = metric
+        print(metric)
+        self.merging = merging
+        self.mulfactor = mulfactor
+        self.linear_end_relu = linear_end_relu
+        self.pre_relu = pre_relu
+        print("Proxy nca")
+
+        self.weights = None
+
+    def on_task_end(self):
+        super().on_task_end()
+        if isinstance(self._scaling, nn.Module):
+            self._scaling.on_task_end()
+
+    def forward(self, features):
+        if isinstance(self.pre_relu, float):
+            features = F.leaky_relu(features, self.pre_relu)
+        elif self.pre_relu:
+            features = F.relu(features)
+        features = self.linear(features)
+        if self.linear_end_relu:
+            features = F.relu(features)
+
+        P = self.weights
+        P = self.mulfactor * F.normalize(P, p=2, dim=-1)
+        X = self.mulfactor * F.normalize(features, p=2, dim=-1)
+
+        if self.metric == "custom_distance":
+            D = self.pairwise_distance(torch.cat(
+                [X, P]
+            ), squared=self.square_dist)[:X.size()[0], X.size()[0]:]
+        elif self.metric == "neg_custom_distance":
+            D = -self.pairwise_distance(torch.cat(
+                [X, P]
+            ), squared=self.square_dist)[:X.size()[0], X.size()[0]:]
+        elif self.metric == "distance":
+            D = torch.cdist(X, P)**2
+        elif self.metric == "cosine":
+            D = torch.mm(X, P.t())
+        else:
+            raise ValueError("Unknown metric {}.".format(self.metric))
+
+        if self.proxy_per_class > 1:
+            D = self._reduce_proxies(D)
+
+        return self._scaling(D)
+
+    def _reduce_proxies(self, similarities):
+        # shape (batch_size, n_classes * proxy_per_class)
+        assert similarities.shape[1] == self.n_classes * self.proxy_per_class
+
+        if self.merging == "mean":
+            return similarities.view(-1, self.n_classes, self.proxy_per_class).mean(-1)
+        elif self.merging == "softmax":
+            simi_per_class = similarities.view(-1, self.n_classes, self.proxy_per_class)
+            attentions = F.softmax(self.gamma * simi_per_class, dim=-1)  # shouldn't be -gamma?
+            return (simi_per_class * attentions).sum(-1)
+        elif self.merging == "max":
+            return similarities.view(-1, self.n_classes, self.proxy_per_class).max(-1)[0]
+        elif self.merging == "min":
+            return similarities.view(-1, self.n_classes, self.proxy_per_class).min(-1)[0]
+        else:
+            raise ValueError("Unknown merging for multiple centers: {}.".format(self.merging))
+
+    @staticmethod
+    def pairwise_distance(a, squared=False):
+        """Computes the pairwise distance matrix with numerical stability."""
+        pairwise_distances_squared = torch.add(
+            a.pow(2).sum(dim=1, keepdim=True).expand(a.size(0), -1),
+            torch.t(a).pow(2).sum(dim=0, keepdim=True).expand(a.size(0), -1)
+        ) - 2 * (torch.mm(a, torch.t(a)))
+
+        # Deal with numerical inaccuracies. Set small negatives to zero.
+        pairwise_distances_squared = torch.clamp(pairwise_distances_squared, min=0.0)
+
+        # Get the mask where the zero distances are at.
+        error_mask = torch.le(pairwise_distances_squared, 0.0)
+
+        # Optionally take the sqrt.
+        if squared:
+            pairwise_distances = pairwise_distances_squared
+        else:
+            pairwise_distances = torch.sqrt(pairwise_distances_squared + error_mask.float() * 1e-16)
+
+        # Undo conditionally adding 1e-16.
+        pairwise_distances = torch.mul(pairwise_distances, (error_mask == False).float())
+
+        # Explicitly set diagonals to zero.
+        mask_offdiagonals = 1 - torch.eye(
+            *pairwise_distances.size(), device=pairwise_distances.device
+        )
+        pairwise_distances = torch.mul(pairwise_distances, mask_offdiagonals)
+
+        return pairwise_distances
 
     def add_custom_weights(self, weights):
         weights = torch.tensor(weights)
@@ -249,171 +494,3 @@ class CosineClassifier(nn.Module):
         self.weights.data[-new_weights.shape[0]:] = new_weights.to(self.device)
 
         return self
-
-
-class ProxyNCA(CosineClassifier):
-
-    def __init__(
-        self,
-        *args,
-        use_scaling=False,
-        pre_relu=False,
-        linear_end_relu=False,
-        linear=False,
-        mulfactor=3,
-        gamma=1,
-        merging="mean",
-        metric="custom_distance",
-        square_dist=True,
-        **kwargs
-    ):
-        super().__init__(*args, **kwargs)
-
-        if use_scaling is True:
-            self._scaling = FactorScalar(1.)
-        elif use_scaling == "heatedup":
-            self._scaling = HeatedUpScalar(16, 4, 6)
-        elif isinstance(use_scaling, float):
-            self._scaling = ConstantScalar(constant=use_scaling)
-        else:
-            self._scaling = ConstantScalar()
-
-        if linear:
-            self.linear = nn.Sequential(
-                nn.BatchNorm1d(self.features_dim), nn.ReLU(inplace=True),
-                nn.Linear(self.features_dim, linear)
-            )
-            self.features_dim = linear
-        else:
-            self.linear = ConstantScalar()
-
-        self.square_dist = square_dist
-        self.gamma = gamma
-        self.metric = metric
-        print(metric)
-        self.merging = merging
-        self.mulfactor = mulfactor
-        self.linear_end_relu = linear_end_relu
-        self.pre_relu = pre_relu
-        print("Proxy nca")
-
-    def on_task_end(self):
-        super().on_task_end()
-        if isinstance(self._scaling, nn.Module):
-            self._scaling.on_task_end()
-
-    def forward(self, features):
-        if isinstance(self.pre_relu, float):
-            features = F.leaky_relu(features, self.pre_relu)
-        elif self.pre_relu:
-            features = F.relu(features)
-        features = self.linear(features)
-        if self.linear_end_relu:
-            features = F.relu(features)
-
-        P = self.weights
-        P = self.mulfactor * F.normalize(P, p=2, dim=-1)
-        X = self.mulfactor * F.normalize(features, p=2, dim=-1)
-
-        if self.metric == "custom_distance":
-            D = self.pairwise_distance(torch.cat(
-                [X, P]
-            ), squared=self.square_dist)[:X.size()[0], X.size()[0]:]
-        elif self.metric == "neg_custom_distance":
-            D = -self.pairwise_distance(torch.cat(
-                [X, P]
-            ), squared=self.square_dist)[:X.size()[0], X.size()[0]:]
-        elif self.metric == "distance":
-            D = torch.cdist(X, P)**2
-        elif self.metric == "cosine":
-            D = torch.mm(X, P.t())
-        else:
-            raise ValueError("Unknown metric {}.".format(self.metric))
-
-        if self.proxy_per_class > 1:
-            D = self._reduce_proxies(D)
-
-        return self._scaling(D)
-
-    def _reduce_proxies(self, similarities):
-        # shape (batch_size, n_classes * proxy_per_class)
-        assert similarities.shape[1] == self.n_classes * self.proxy_per_class
-
-        if self.merging == "mean":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).mean(-1)
-        elif self.merging == "softmax":
-            simi_per_class = similarities.view(-1, self.n_classes, self.proxy_per_class)
-            attentions = F.softmax(self.gamma * simi_per_class, dim=-1)  # shouldn't be -gamma?
-            return (simi_per_class * attentions).sum(-1)
-        elif self.merging == "max":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).max(-1)[0]
-        elif self.merging == "min":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).min(-1)[0]
-        else:
-            raise ValueError("Unknown merging for multiple centers: {}.".format(self.merging))
-
-    @staticmethod
-    def pairwise_distance(a, squared=False):
-        """Computes the pairwise distance matrix with numerical stability."""
-        pairwise_distances_squared = torch.add(
-            a.pow(2).sum(dim=1, keepdim=True).expand(a.size(0), -1),
-            torch.t(a).pow(2).sum(dim=0, keepdim=True).expand(a.size(0), -1)
-        ) - 2 * (torch.mm(a, torch.t(a)))
-
-        # Deal with numerical inaccuracies. Set small negatives to zero.
-        pairwise_distances_squared = torch.clamp(pairwise_distances_squared, min=0.0)
-
-        # Get the mask where the zero distances are at.
-        error_mask = torch.le(pairwise_distances_squared, 0.0)
-
-        # Optionally take the sqrt.
-        if squared:
-            pairwise_distances = pairwise_distances_squared
-        else:
-            pairwise_distances = torch.sqrt(pairwise_distances_squared + error_mask.float() * 1e-16)
-
-        # Undo conditionally adding 1e-16.
-        pairwise_distances = torch.mul(pairwise_distances, (error_mask == False).float())
-
-        # Explicitly set diagonals to zero.
-        mask_offdiagonals = 1 - torch.eye(
-            *pairwise_distances.size(), device=pairwise_distances.device
-        )
-        pairwise_distances = torch.mul(pairwise_distances, mask_offdiagonals)
-
-        return pairwise_distances
-
-
-class SoftTriple(ProxyNCA):
-
-    def __init__(self, *args, normalize=True, proxy_per_class=10, gamma=0.1, op="dot", **kwargs):
-        super().__init__(*args, proxy_per_class=proxy_per_class, **kwargs)
-        self.normalize = normalize
-        self.gamma = gamma
-        self.op = op
-
-        assert op in ("dot", "distance"), op
-
-    def forward(self, x):
-        if self.normalize:
-            x = F.normalize(x, dim=-1, p=2)
-            w = F.normalize(self.weights, dim=-1, p=2)
-        else:
-            w = self.weights
-
-        centers_per_class = w.view(self.n_classes, self.proxy_per_class, -1)
-
-        # Merge centers of same class by soft max:
-        merged_centers = []
-        for c in range(self.n_classes):
-            if self.op == "dot":
-                xTw = torch.mm(x, centers_per_class[c].t())
-            elif self.op == "distance":
-                xTw = self.pairwise_distance(torch.cat([x, w]),
-                                             squared=True)[:x.size()[0], x.size()[0]:]
-
-            s_c = (F.softmax((1 / self.gamma) * xTw, dim=-1) * xTw).sum(-1)
-
-            merged_centers.append(s_c)
-
-        return torch.stack(merged_centers).transpose(1, 0)

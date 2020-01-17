@@ -325,7 +325,8 @@ def double_margin_constrastive_regularization(
             simi = -0.5 * (inter_dist - 2)
             first_moment = torch.mean(simi)
             second_moment = torch.mean(torch.pow(simi, 2))
-            inter_loss = torch.pow(first_moment, 2) + torch.clamp(second_moment - 1. / weights.shape[-1], min=0.)
+            inter_loss = torch.pow(first_moment,
+                                   2) + torch.clamp(second_moment - 1. / weights.shape[-1], min=0.)
             loss += inter_loss
         elif inter_margin == "simi":
             if square:
@@ -405,3 +406,21 @@ def _dmr_aggreg(losses, aggreg_mode="mean"):
 def _adamine(losses):
     nb_not_neg = max(len(torch.nonzero(losses)), 1.0)
     return losses.sum() / nb_not_neg
+
+
+def double_margin_constrastive_regularization_features(
+    features, targets, intra_margin=0.2, inter_margin=0.8
+):
+    pos_tuples, neg_tuples = [], []
+
+    np_targets = targets.cpu().numpy()
+    for i, t in enumerate(range(np_targets)):
+        indexes_similar = np.where(targets == t)[0]
+        indexes_disimilar = np.where(targets != t)[0]
+
+        if len(indexes_similar):
+            pos = np.random.choice(indexes_similar)
+            pos_tuple.append((i, pos))
+        if len(indexes_disimilar):
+            neg = np.random.choice(indexes_disimilar)
+            neg_tuple.append((i, neg))

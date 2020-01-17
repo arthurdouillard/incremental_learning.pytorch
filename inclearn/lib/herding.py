@@ -1,4 +1,5 @@
 import numpy as np
+from sklearn.cluster import KMeans
 
 from inclearn.lib import utils
 
@@ -36,6 +37,49 @@ def icarl_selection(features, nb_examplars):
     return herding_matrix.argsort()[:nb_examplars]
 
 
+def random(features, nb_examplars):
+    return np.random.permutation(len(features))[:nb_examplars]
+
+
+def kmeans(features, nb_examplars, k=5):
+    """Samples examplars for memory according to KMeans.
+
+    :param features: The image features of a single class.
+    :param nb_examplars: Number of images to keep.
+    :param k: Number of clusters for KMeans algo, defaults to 5
+    :return: A numpy array of indexes.
+    """
+    model = KMeans(n_clusters=k)
+    cluster_assignements = model.fit_predict(features)
+
+    nb_per_clusters = nb_examplars // k
+    indexes = []
+    for c in range(k):
+        c_indexes = np.random.choice(np.where(cluster_assignements == c)[0], size=nb_per_clusters)
+        indexes.append(c_indexes)
+
+    return np.concatenate(indexes)
+
+
+def confusion(ypreds, ytrue, nb_examplars, class_id=None, minimize_confusion=True):
+    """Samples examplars for memory according to the predictions.
+
+    :param ypreds: All the predictions (shape [b, c]).
+    :param ytrue: The true label.
+    :param nb_examplars: Number of images to keep.
+    :param minimize_confusion: Samples easiest examples or hardest.
+    """
+    indexes = np.where(ytrue == class_id)[0]
+    ypreds, ytrue = ypreds[indexes], ytrue[indexes]
+
+    ranks = ypreds.argsort(axis=1)[:, ::-1][np.arange(len(ypreds)), ytrue]
+
+    indexes = ranks.argsort()
+    if minimize_confusion:
+        return indexes[:nb_examplars]
+    return indexes[-nb_examplars:]
+
+
 def minimize_confusion(inc_dataset, network, memory, class_index, nb_examplars):
     _, new_loader = inc_dataset.get_custom_loader(class_index, mode="test")
     new_features, _ = utils.extract_features(network, new_loader)
@@ -56,7 +100,6 @@ def minimize_confusion(inc_dataset, network, memory, class_index, nb_examplars):
 
     return np.concatenate(indexes)
 
-
     if memory is None:
         # First task
         #return icarl_selection(new_features, nb_examplars)
@@ -67,9 +110,7 @@ def minimize_confusion(inc_dataset, network, memory, class_index, nb_examplars):
     data_memory, targets_memory = memory
     for indexes in _split_memory_per_class(targets_memory):
         _, old_loader = inc_dataset.get_custom_loader(
-            [],
-            memory=(data_memory[indexes], targets_memory[indexes]),
-            mode="test"
+            [], memory=(data_memory[indexes], targets_memory[indexes]), mode="test"
         )
 
         old_features, _ = utils.extract_features(network, old_loader)
@@ -79,6 +120,7 @@ def minimize_confusion(inc_dataset, network, memory, class_index, nb_examplars):
         distances -= _l2_distance(old_mean, new_features)
 
     return distances.argsort()[:int(nb_examplars)]
+
 
 # ---------
 # Utilities

@@ -2,12 +2,16 @@
 
 https://github.com/srebuffi/iCaRL/blob/master/iCaRL-TheanoLasagne/utils_cifar100.py
 """
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
 
 from inclearn.lib import pooling
+
+logger = logging.getLogger(__name__)
 
 
 class DownsampleStride(nn.Module):
@@ -189,7 +193,7 @@ class CifarResNet(nn.Module):
             raise ValueError("Unused kwargs: {}.".format(kwargs))
 
         self.all_attentions = all_attentions
-        print("Downsampling type", downsampling)
+        logger.info("Downsampling type {}".format(downsampling))
         self._downsampling_type = downsampling
         self.last_relu = last_relu
 
@@ -255,9 +259,7 @@ class CifarResNet(nn.Module):
             planes = 2 * planes
 
         for i in range(n):
-            layers.append(
-                Block(planes, last_relu=False, downsampling=self._downsampling_type)
-            )
+            layers.append(Block(planes, last_relu=False, downsampling=self._downsampling_type))
 
         return Stage(layers, block_relu=self.last_relu)
 
@@ -282,11 +284,7 @@ class CifarResNet(nn.Module):
         else:
             attentions = [feats_s1[-1], feats_s2[-1], feats_s3[-1], x]
 
-        return {
-            "raw_features": raw_features,
-            "features": features,
-            "attention": attentions
-        }
+        return {"raw_features": raw_features, "features": features, "attention": attentions}
 
     def end_features(self, x):
         x = self.pool(x)
