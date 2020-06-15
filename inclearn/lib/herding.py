@@ -1,5 +1,7 @@
 import numpy as np
+import torch
 from sklearn.cluster import KMeans
+from torch.nn import functional as F
 
 from inclearn.lib import utils
 
@@ -122,9 +124,71 @@ def minimize_confusion(inc_dataset, network, memory, class_index, nb_examplars):
     return distances.argsort()[:int(nb_examplars)]
 
 
+def var_ratio(memory_per_class, network, loader, select="max", type=None):
+    var_ratios = []
+    for input_dict in loader:
+        inputs = input_dict["inputs"].to(network.device)
+        with torch.no_grad():
+            outputs = network(inputs)
+        var_ratios.append(outputs["var_ratio"])
+    var_ratios = np.concatenate(var_ratios)
+
+    indexes = var_ratios.argsort()
+    if select == "max":
+        return indexes[-memory_per_class:]
+    elif select == "min":
+        return indexes[:memory_per_class]
+    raise ValueError("Only possible value for <select> are [max, min], not {}.".format(select))
+
+
+def mcbn(memory_per_class, network, loader, select="max", nb_samples=100, type=None):
+    if not hasattr(network.convnet, "sampling_mode"):
+        raise ValueError("Network must be MCBN-compatible.")
+    network.convnet.sampling_mode()
+
+    all_probs = []
+    for input_dict in loader:
+        inputs = input_dict["inputs"].to(network.device)
+
+        probs = []
+        for _ in range(nb_samples):
+            with torch.no_grad():
+                outputs = network(inputs)
+                logits = outputs["logits"]
+                probs.append(F.softmax(logits, dim=-1).cpu().numpy())
+
+        probs = np.stack(probs)
+        all_probs.append(probs)
+    network.convnet.normal_mode()
+
+    all_probs = np.concatenate(all_probs, axis=1)
+    var_ratios = _var_ratio(all_probs.transpose(1, 0, 2))
+
+    indexes = var_ratios.argsort()
+    assert len(indexes) == all_probs.shape[1]
+    if select == "max":
+        return indexes[-memory_per_class:]
+    elif select == "min":
+        return indexes[:memory_per_class]
+    raise ValueError("Only possible value for <select> are [max, min], not {}.".format(select))
+
+
 # ---------
 # Utilities
 # ---------
+
+
+def _var_ratio(sampled_probs):
+    predicted_class = sampled_probs.max(axis=2)
+
+    hist = np.array(
+        [
+            np.histogram(predicted_class[i, :], range=(0, 10))[0]
+            for i in range(predicted_class.shape[0])
+        ]
+    )
+
+    return 1. - hist.max(axis=1) / sampled_probs.shape[1]
 
 
 def _l2_distance(x, y):

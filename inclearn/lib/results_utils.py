@@ -25,15 +25,18 @@ def get_save_folder(model, date, label):
     return folder_path
 
 
-def save_results(results, label, model, date, run_id):
+def save_results(results, label, model, date, run_id, seed):
     del results["config"]["device"]
 
     folder_path = get_save_folder(model, date, label)
 
-    file_path = "run_{}_.json".format(run_id)
+    file_path = "run_{}_.json".format(seed)
 
     with open(os.path.join(folder_path, file_path), "w+") as f:
-        json.dump(results, f, indent=2)
+        try:
+            json.dump(results, f, indent=2)
+        except Exception:
+            print("Failed to dump exps on json file.")
 
 
 def extract(paths, metric="avg_inc", nb_classes=None):
@@ -52,9 +55,26 @@ def extract(paths, metric="avg_inc", nb_classes=None):
         with open(path) as f:
             data = json.load(f)
 
-        score_plot.append([100 * task["accuracy"]["total"] for task in data["results"]])
+        if metric in ("avg_inc", "accuracy"):
+            score_plot.append([100 * task["accuracy"]["total"] for task in data["results"]])
+        elif metric == "accuracy_top5":
+            score_plot.append([100 * task["accuracy_top5"]["total"] for task in data["results"]])
+        elif metric == "old_accuracy":
+            score_plot.append([100 * task.get("old_accuracy", 0.) for task in data["results"]])
+        elif metric == "new_accuracy":
+            score_plot.append([100 * task.get("new_accuracy", 0.) for task in data["results"]])
+        elif metric == "unseen":
+            score_plot.append(
+                [100 * task.get("unseen_classes_accuracy", 0.) for task in data["results"]]
+            )
+        elif metric == "seen":
+            score_plot.append(
+                [100 * task.get("seen_classes_accuracy", 0.) for task in data["results"]]
+            )
+        else:
+            raise ValueError("bouh")
 
-        if metric == "avg_inc":
+        if metric in ("avg_inc", "accuracy", "accuracy_top5", "old_accuracy", "new_accuracy"):
             score_tab.append(score_plot[-1])
         elif metric == "avg_cls":
             accs = []
@@ -154,7 +174,9 @@ def plot(
     min_acc=0,
     first_n_steps=None,
     figsize=(10, 5),
-    metric="avg_inc"
+    metric="avg_inc",
+    zeroshot=False,
+    ylabel="Accuracy over seen classes"
 ):
     """Plotting utilities to visualize several experiments.
 
@@ -205,7 +227,7 @@ def plot(
         )
 
         try:
-            plt.errorbar(x, means, stds, label=label, marker="o", markersize=3, **kwargs)
+            bar = plt.errorbar(x, means, stds, label=label, marker="o", markersize=3, **kwargs)
         except Exception:
             print(x)
             print(means)
@@ -213,9 +235,17 @@ def plot(
             print(label)
             raise
 
+        if zeroshot:
+            unseen_accs, _ = extract(path, "unseen", nb_classes=total)
+            plt.plot(
+                x[:-1], unseen_accs[0][:-1], linestyle='dashed', color=bar.lines[0].get_color()
+            )
+            seen_accs, _ = extract(path, "seen", nb_classes=total)
+            plt.plot(x, seen_accs[0], linestyle='dotted', color=bar.lines[0].get_color())
+
     plt.legend(loc="upper right")
     plt.xlabel("Number of classes")
-    plt.ylabel("Accuracy over seen classes")
+    plt.ylabel(ylabel)
     plt.title(title)
 
     for y in range(min_acc, max_acc + 1, 10):
@@ -226,5 +256,6 @@ def plot(
     plt.xticks(list(range(initial_increment, total + 1, x_ticks)))
 
     if path_to_save:
+        os.makedirs(os.path.dirname(path_to_save), exist_ok=True)
         plt.savefig(path_to_save)
     plt.show()

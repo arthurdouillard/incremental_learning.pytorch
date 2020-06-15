@@ -65,6 +65,19 @@ def extract_features(model, loader):
     return np.concatenate(features), np.concatenate(targets)
 
 
+def compute_centroids(model, loader):
+    features, targets = extract_features(model, loader)
+
+    centroids_features, centroids_targets = [], []
+    for t in np.unique(targets):
+        indexes = np.where(targets == t)[0]
+
+        centroids_features.append(np.mean(features[indexes], axis=0, keepdims=True))
+        centroids_targets.append(t)
+
+    return np.concatenate(centroids_features), np.array(centroids_targets)
+
+
 def classify(model, loader):
     targets, predictions = [], []
 
@@ -141,6 +154,22 @@ def add_new_weights(network, weight_generation, current_nb_classes, task_size, i
         network.add_custom_weights(np.stack(mean_embeddings))
     elif weight_generation["type"] == "basic":
         network.add_classes(task_size)
+    elif weight_generation["type"] == "ghosts":
+        features, targets = weight_generation["ghosts"]
+        features = features.cpu().numpy()
+        targets = targets.cpu().numpy()
+
+        weights = []
+        for class_id in range(current_nb_classes, current_nb_classes + task_size):
+            indexes = np.where(targets == class_id)[0]
+
+            class_features = features[indexes]
+            if len(class_features) == 0:
+                raise Exception(f"No ghost class_id={class_id} for weight generation!")
+            weights.append(np.mean(class_features, axis=0))
+
+        weights = torch.tensor(np.stack(weights)).float()
+        network.add_custom_weights(weights, ponderate=weight_generation.get("ponderate"))
     else:
         raise ValueError("Unknown weight generation type {}.".format(weight_generation["type"]))
 
@@ -172,7 +201,13 @@ def apply_kmeans(features, targets, nb_clusters, pre_normalization):
 
 
 def apply_knn(
-    features, targets, features_test, targets_test, nb_neighbors, normalize=True, weights="uniform"
+    features,
+    targets,
+    features_test,
+    targets_test,
+    nb_neighbors,
+    normalize=True,
+    weights="uniform"
 ):
     logger.info(
         "KNN with {} neighbors and pre-normalized features: {}, weights: {}.".format(

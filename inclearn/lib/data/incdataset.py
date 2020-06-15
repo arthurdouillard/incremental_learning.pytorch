@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from .datasets import (
-    ImageNet100, ImageNet100UCIR, ImageNet1000, TinyImageNet200, iCIFAR10, iCIFAR100
+    APY, CUB200, LAD, AwA2, ImageNet100, ImageNet100UCIR, ImageNet1000, TinyImageNet200, iCIFAR10,
+    iCIFAR100
 )
 
 logger = logging.getLogger(__name__)
@@ -52,8 +53,13 @@ class IncrementalDataset:
         class_order=None,
         dataset_transforms=None,
         all_test_classes=False,
+        metadata_path=None
     ):
         datasets = _get_datasets(dataset_name)
+        if metadata_path:
+            print("Adding metadata path {}".format(metadata_path))
+            datasets[0].metadata_path = metadata_path
+
         self._setup_data(
             datasets,
             random_order=random_order,
@@ -88,23 +94,35 @@ class IncrementalDataset:
     def n_tasks(self):
         return len(self.increments)
 
+    @property
+    def n_classes(self):
+        return sum(self.increments)
+
     def new_task(self, memory=None, memory_val=None):
         if self._current_task >= len(self.increments):
             raise Exception("No more tasks.")
 
         min_class = sum(self.increments[:self._current_task])
         max_class = sum(self.increments[:self._current_task + 1])
+
         x_train, y_train = self._select(
             self.data_train, self.targets_train, low_range=min_class, high_range=max_class
         )
+        nb_new_classes = len(np.unique(y_train))
         x_val, y_val = self._select(
             self.data_val, self.targets_val, low_range=min_class, high_range=max_class
         )
-        if self._all_test_classes:
+        if self._all_test_classes is True:
             logger.info("Testing on all classes!")
             x_test, y_test = self._select(
                 self.data_test, self.targets_test, high_range=sum(self.increments)
             )
+        elif self._all_test_classes is not None or self._all_test_classes is not False:
+            max_class = sum(self.increments[:self._current_task + 1 + self._all_test_classes])
+            logger.info(
+                f"Testing on {self._all_test_classes} unseen tasks (max class = {max_class})."
+            )
+            x_test, y_test = self._select(self.data_test, self.targets_test, high_range=max_class)
         else:
             x_test, y_test = self._select(self.data_test, self.targets_test, high_range=max_class)
 
@@ -136,7 +154,7 @@ class IncrementalDataset:
             "min_class": min_class,
             "max_class": max_class,
             "total_n_classes": sum(self.increments),
-            "increment": self.increments[self._current_task],
+            "increment": nb_new_classes,  # self.increments[self._current_task],
             "task": self._current_task,
             "max_task": len(self.increments),
             "n_train_data": x_train.shape[0],
@@ -200,7 +218,8 @@ class IncrementalDataset:
             data = np.concatenate(data)
             targets = np.concatenate(targets)
 
-        if memory is not None or (isinstance(memory, tuple) and memory[0] is None):
+        if (not isinstance(memory, tuple) and
+            memory is not None) or (isinstance(memory, tuple) and memory[0] is not None):
             if len(data) > 0:
                 data, targets, memory_flags = self._add_memory(data, targets, *memory)
             else:
@@ -291,8 +310,10 @@ class IncrementalDataset:
                 order = class_order
             elif dataset.class_order is not None:
                 order = dataset.class_order
+            elif train_dataset.class_order is not None:
+                order = train_dataset.class_order
 
-            logger.info("Dataset {}: class ordering: {}.".format(dataset, order))
+            logger.info("Dataset {}: class ordering: {}.".format(dataset.__name__, order))
 
             self.class_order.append(order)
 
@@ -308,12 +329,30 @@ class IncrementalDataset:
             if len(datasets) > 1:
                 self.increments.append(len(order))
             elif initial_increment is None:
-                self.increments = [increment for _ in range(len(order) // increment)]
+                nb_steps = len(order) / increment
+                remainder = len(order) - int(nb_steps) * increment
+
+                if not nb_steps.is_integer():
+                    logger.warning(
+                        f"THe last step will have sligthly less sample ({remainder} vs {increment})."
+                    )
+                    self.increments = [increment for _ in range(int(nb_steps))]
+                    self.increments.append(remainder)
+                else:
+                    self.increments = [increment for _ in range(int(nb_steps))]
             else:
-                self.increments = [initial_increment] + [
-                    increment
-                    for _ in range((len(order) // increment) - (initial_increment // increment))
-                ]
+                self.increments = [initial_increment]
+
+                nb_steps = (len(order) - initial_increment) / increment
+                remainder = (len(order) - initial_increment) - int(nb_steps) * increment
+                if not nb_steps.is_integer():
+                    logger.warning(
+                        f"THe last step will have sligthly less sample ({remainder} vs {increment})."
+                    )
+                    self.increments.extend([increment for _ in range(int(nb_steps))])
+                    self.increments.append(remainder)
+                else:
+                    self.increments.extend([increment for _ in range(int(nb_steps))])
 
             self.data_train.append(x_train)
             self.targets_train.append(y_train)
@@ -359,9 +398,8 @@ class IncrementalDataset:
             x_train.append(x[train_indexes])
             y_train.append(y[train_indexes])
 
-        x_val, y_val = np.concatenate(x_val), np.concatenate(y_val)
         x_train, y_train = np.concatenate(x_train), np.concatenate(y_train)
-
+        x_val, y_val = np.concatenate(x_val), np.concatenate(y_val)
         return x_val, y_val, x_train, y_train
 
 
@@ -388,7 +426,6 @@ class DummyDataset(torch.utils.data.Dataset):
             img = Image.fromarray(x.astype("uint8"))
 
         img = self.trsf(img)
-
         return {"inputs": img, "targets": y, "memory_flags": memory_flag}
 
 
@@ -411,5 +448,13 @@ def _get_dataset(dataset_name):
         return ImageNet1000
     elif dataset_name == "tinyimagenet":
         return TinyImageNet200
+    elif dataset_name == "awa2":
+        return AwA2
+    elif dataset_name == "cub200":
+        return CUB200
+    elif dataset_name == "apy":
+        return APY
+    elif dataset_name == "lad":
+        return LAD
     else:
         raise NotImplementedError("Unknown dataset {}.".format(dataset_name))

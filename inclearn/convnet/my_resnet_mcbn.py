@@ -3,6 +3,7 @@
 https://github.com/srebuffi/iCaRL/blob/master/iCaRL-TheanoLasagne/utils_cifar100.py
 """
 import logging
+import random
 
 import torch
 import torch.nn as nn
@@ -31,11 +32,56 @@ class DownsampleConv(nn.Module):
 
         self.conv = nn.Sequential(
             nn.Conv2d(inplanes, planes, stride=2, kernel_size=1, bias=False),
-            nn.BatchNorm2d(planes),
+            MCBatchNorm2d(planes),
         )
 
     def forward(self, x):
         return self.conv(x)
+
+
+class MCBatchNorm2d(nn.Module):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.bn = nn.BatchNorm2d(*args, **kwargs)
+
+        self.recorded_means = []
+        self.recorded_vars = []
+
+        self.eps = 1e-8
+        self._mode = "normal"
+
+    def clear_records(self):
+        self.recorded_means = []
+        self.recorded_vars = []
+
+    def record_mode(self):
+        self._mode = "record"
+
+    def normal_mode(self):
+        self._mode = "normal"
+
+    def sampling_mode(self):
+        self._mode = "sampling"
+
+    def forward(self, x):
+        if self._mode == "normal":
+            return self.bn(x)
+        elif self._mode == "record":
+            with torch.no_grad():
+                self.recorded_means.append(x.mean([0, 2, 3]))
+                self.recorded_vars.append(x.var([0, 2, 3], unbiased=False))
+
+            return self.bn(x)
+
+        # Sampling mode
+        index = random.randint(0, len(self.recorded_means) - 1)
+        mean = self.recorded_means[index]
+        var = self.recorded_vars[index]
+
+        normed_x = (x -
+                    mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
+        return normed_x * self.bn.weight[None, :, None, None] + self.bn.bias[None, :, None, None]
 
 
 class ResidualBlock(nn.Module):
@@ -56,10 +102,10 @@ class ResidualBlock(nn.Module):
         self.conv_a = nn.Conv2d(
             inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
         )
-        self.bn_a = nn.BatchNorm2d(planes)
+        self.bn_a = MCBatchNorm2d(planes)
 
         self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn_b = nn.BatchNorm2d(planes)
+        self.bn_b = MCBatchNorm2d(planes)
 
         if increase_dim:
             if downsampling == "stride":
@@ -111,12 +157,12 @@ class PreActResidualBlock(nn.Module):
             first_stride = 1
             planes = inplanes
 
-        self.bn_a = nn.BatchNorm2d(inplanes)
+        self.bn_a = MCBatchNorm2d(inplanes)
         self.conv_a = nn.Conv2d(
             inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
         )
 
-        self.bn_b = nn.BatchNorm2d(planes)
+        self.bn_b = MCBatchNorm2d(planes)
         self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
 
         if increase_dim:
@@ -205,7 +251,7 @@ class CifarResNet(nn.Module):
         super(CifarResNet, self).__init__()
 
         self.conv_1_3x3 = nn.Conv2d(channels, nf, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn_1 = nn.BatchNorm2d(nf)
+        self.bn_1 = MCBatchNorm2d(nf)
 
         self.stage_1 = self._make_layer(Block, nf, increase_dim=False, n=n)
         self.stage_2 = self._make_layer(Block, nf, increase_dim=True, n=n - 1)
@@ -247,16 +293,16 @@ class CifarResNet(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, MCBatchNorm2d):
+                nn.init.constant_(m.bn.weight, 1)
+                nn.init.constant_(m.bn.bias, 0)
             elif isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
 
         if zero_residual:
             for m in self.modules():
                 if isinstance(m, ResidualBlock):
-                    nn.init.constant_(m.bn_b.weight, 0)
+                    nn.init.constant_(m.bn_b.bn.weight, 0)
 
     def _make_layer(self, Block, planes, increase_dim=False, n=None):
         layers = []
@@ -308,6 +354,42 @@ class CifarResNet(nn.Module):
             x = self.final_layer(x)
 
         return x
+
+    def clear_records(self):
+        self.bn_1.clear_records()
+        self.stage_4.bn_a.clear_records()
+        self.stage_4.bn_b.clear_records()
+        for stage in [self.stage_1, self.stage_2, self.stage_3]:
+            for block in stage.blocks:
+                block.bn_a.clear_records()
+                block.bn_b.clear_records()
+
+    def record_mode(self):
+        self.bn_1.record_mode()
+        self.stage_4.bn_a.record_mode()
+        self.stage_4.bn_b.record_mode()
+        for stage in [self.stage_1, self.stage_2, self.stage_3]:
+            for block in stage.blocks:
+                block.bn_a.record_mode()
+                block.bn_b.record_mode()
+
+    def normal_mode(self):
+        self.bn_1.normal_mode()
+        self.stage_4.bn_a.normal_mode()
+        self.stage_4.bn_b.normal_mode()
+        for stage in [self.stage_1, self.stage_2, self.stage_3]:
+            for block in stage.blocks:
+                block.bn_a.normal_mode()
+                block.bn_b.normal_mode()
+
+    def sampling_mode(self):
+        self.bn_1.sampling_mode()
+        self.stage_4.bn_a.sampling_mode()
+        self.stage_4.bn_b.sampling_mode()
+        for stage in [self.stage_1, self.stage_2, self.stage_3]:
+            for block in stage.blocks:
+                block.bn_a.sampling_mode()
+                block.bn_b.sampling_mode()
 
 
 def resnet_rebuffi(n=5, **kwargs):

@@ -7,9 +7,9 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import init
-
+from inclearn.convnet.tools.conv_mtl import Conv2dMtl
 from inclearn.lib import pooling
+from torch.nn import init
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class DownsampleConv(nn.Module):
         super().__init__()
 
         self.conv = nn.Sequential(
-            nn.Conv2d(inplanes, planes, stride=2, kernel_size=1, bias=False),
+            Conv2dMtl(inplanes, planes, stride=2, kernel_size=1, bias=False),
             nn.BatchNorm2d(planes),
         )
 
@@ -53,12 +53,12 @@ class ResidualBlock(nn.Module):
             first_stride = 1
             planes = inplanes
 
-        self.conv_a = nn.Conv2d(
+        self.conv_a = Conv2dMtl(
             inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
         )
         self.bn_a = nn.BatchNorm2d(planes)
 
-        self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv_b = Conv2dMtl(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn_b = nn.BatchNorm2d(planes)
 
         if increase_dim:
@@ -112,12 +112,12 @@ class PreActResidualBlock(nn.Module):
             planes = inplanes
 
         self.bn_a = nn.BatchNorm2d(inplanes)
-        self.conv_a = nn.Conv2d(
+        self.conv_a = Conv2dMtl(
             inplanes, planes, kernel_size=3, stride=first_stride, padding=1, bias=False
         )
 
         self.bn_b = nn.BatchNorm2d(planes)
-        self.conv_b = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv_b = Conv2dMtl(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
 
         if increase_dim:
             self.downsample = DownsampleStride()
@@ -204,7 +204,7 @@ class CifarResNet(nn.Module):
 
         super(CifarResNet, self).__init__()
 
-        self.conv_1_3x3 = nn.Conv2d(channels, nf, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv_1_3x3 = Conv2dMtl(channels, nf, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn_1 = nn.BatchNorm2d(nf)
 
         self.stage_1 = self._make_layer(Block, nf, increase_dim=False, n=n)
@@ -223,7 +223,7 @@ class CifarResNet(nn.Module):
 
         self.out_dim = 4 * nf
         if final_layer in (True, "conv"):
-            self.final_layer = nn.Conv2d(self.out_dim, self.out_dim, kernel_size=1, bias=False)
+            self.final_layer = Conv2dMtl(self.out_dim, self.out_dim, kernel_size=1, bias=False)
         elif isinstance(final_layer, dict):
             if final_layer["type"] == "one_layer":
                 self.final_layer = nn.Sequential(
@@ -245,8 +245,9 @@ class CifarResNet(nn.Module):
             self.final_layer = None
 
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if isinstance(m, Conv2dMtl):
+                #nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                m.reset_parameters()
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
@@ -266,14 +267,16 @@ class CifarResNet(nn.Module):
                 Block(
                     planes,
                     increase_dim=True,
-                    last_relu=False,
+                    last_relu=self.last_relu,
                     downsampling=self._downsampling_type
                 )
             )
             planes = 2 * planes
 
         for i in range(n):
-            layers.append(Block(planes, last_relu=False, downsampling=self._downsampling_type))
+            layers.append(
+                Block(planes, last_relu=self.last_relu, downsampling=self._downsampling_type)
+            )
 
         return Stage(layers, block_relu=self.last_relu)
 
@@ -308,6 +311,50 @@ class CifarResNet(nn.Module):
             x = self.final_layer(x)
 
         return x
+
+    def apply_mtl(self, b):
+        logger.info(f"Apply mtl: {b}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.apply_mtl = b
+
+    def apply_mtl_bias(self, b):
+        logger.info(f"Apply mtl bias: {b}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.apply_mtl_bias = b
+
+    def apply_bias_on_weights(self, b):
+        logger.info(f"Apply mtl bias on weights: {b}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.apply_bias_on_weights = b
+
+    def fuse_mtl_weights(self):
+        logger.info("Fuse mtl weights.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.fuse_mtl_weights()
+
+    def reset_mtl_parameters(self):
+        logger.info("Reset mtl weights.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.reset_mtl_parameters()
+
+    def freeze_convnet(self, freeze, bn_weights=False, bn_stats=False):
+        logger.info(f"Freeze convnet: {freeze}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.freeze_convnet(freeze)
+            elif isinstance(m, nn.BatchNorm2d):
+                if freeze and bn_stats:
+                    m.eval()
+                else:
+                    m.train()
+                if bn_weights:
+                    m.weight.requires_grad = not freeze
+                    m.bias.requires_grad = not freeze
 
 
 def resnet_rebuffi(n=5, **kwargs):

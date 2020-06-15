@@ -1,5 +1,6 @@
 import abc
 import logging
+import os
 
 import torch
 
@@ -23,13 +24,13 @@ class IncrementalLearner(abc.ABC):
     def __init__(self, *args, **kwargs):
         self._network = None
 
-    def set_task_info(self, task, total_n_classes, increment, n_train_data, n_test_data, n_tasks):
-        self._task = task
-        self._task_size = increment
-        self._total_n_classes = total_n_classes
-        self._n_train_data = n_train_data
-        self._n_test_data = n_test_data
-        self._n_tasks = n_tasks
+    def set_task_info(self, task_info):
+        self._task = task_info["task"]
+        self._total_n_classes = task_info["total_n_classes"]
+        self._task_size = task_info["increment"]
+        self._n_train_data = task_info["n_train_data"]
+        self._n_test_data = task_info["n_test_data"]
+        self._n_tasks = task_info["max_task"]
 
     def before_task(self, train_loader, val_loader):
         LOGGER.info("Before task")
@@ -40,6 +41,11 @@ class IncrementalLearner(abc.ABC):
         LOGGER.info("train task")
         self.train()
         self._train_task(train_loader, val_loader)
+
+    def after_task_intensive(self, inc_dataset):
+        LOGGER.info("after task")
+        self.eval()
+        self._after_task_intensive(inc_dataset)
 
     def after_task(self, inc_dataset):
         LOGGER.info("after task")
@@ -63,16 +69,19 @@ class IncrementalLearner(abc.ABC):
     def _train_task(self, train_loader, val_loader):
         raise NotImplementedError
 
+    def _after_task_intensive(self, data_loader):
+        pass
+
     def _after_task(self, data_loader):
         pass
 
     def _eval_task(self, data_loader):
         raise NotImplementedError
 
-    def save_metadata(self, path):
+    def save_metadata(self, directory, run_id):
         pass
 
-    def load_metadata(self, path):
+    def load_metadata(self, directory, run_id):
         pass
 
     @property
@@ -91,16 +100,22 @@ class IncrementalLearner(abc.ABC):
     def network(self):
         return self._network
 
-    @network.setter
-    def network(self, network_path):
-        if self._network is not None:
-            del self._network
+    def save_parameters(self, directory, run_id):
+        path = os.path.join(directory, f"net_{run_id}_task_{self._task}.pth")
+        logger.info(f"Saving model at {path}.")
+        torch.save(self.network.state_dict(), path)
 
-        logger.info("Loading model from {}.".format(network_path))
-        self._network = torch.load(network_path)
-        self._network.to(self._device)
-        self._network.device = self._device
-        self._network.classifier.device = self._device
+    def load_parameters(self, directory, run_id):
+        path = os.path.join(directory, f"net_{run_id}_task_{self._task}.pth")
+        if not os.path.exists(path):
+            return
+
+        logger.info(f"Loading model at {path}.")
+        try:
+            self.network.load_state_dict(torch.load(path))
+        except Exception:
+            logger.warning("Old method to save weights, it's deprecated!")
+            self._network = torch.load(path)
 
     def eval(self):
         self._network.eval()

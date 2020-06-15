@@ -88,6 +88,9 @@ def get_parser():
     parser.add_argument("-resume", "--resume", default=None,
                         help="Resume from previously saved model, "
                              "must be in the format `*_task_[0-9]+\.pth`.")
+    parser.add_argument("--resume-first", action="store_true", default=False)
+    parser.add_argument("--recompute-meta", action="store_true", default=False)
     parser.add_argument("--no-benchmark", action="store_true", default=False)
+    parser.add_argument("--detect-anomaly", action="store_true", default=False)
 
     return parser

@@ -1,4 +1,6 @@
 import logging
+import os
+import pickle
 
 import numpy as np
 import torch
@@ -25,26 +27,50 @@ class BiC(ICarl):
         self._validation = args["validation"]
         self._temperature = args["temperature"]
         self._herding_val_indexes = []
+        self._val_memory = None
         logger.info("Initializing BiC")
 
         super().__init__(args)
 
-    def _after_task(self, inc_dataset):
+    def save_metadata(self, directory, run_id):
+        path = os.path.join(directory, f"meta_{run_id}_task_{self._task}.pkl")
+
+        logger.info("Saving metadata at {}.".format(path))
+        with open(path, "wb+") as f:
+            pickle.dump(
+                [
+                    self._data_memory, self._targets_memory, self._herding_indexes,
+                    self._class_means, self._herding_val_indexes, self._val_memory
+                ], f
+            )
+
+    def load_metadata(self, directory, run_id):
+        path = os.path.join(directory, f"meta_{run_id}_task_{self._task}.pkl")
+        if not os.path.exists(path):
+            return
+
+        logger.info("Loading metadata at {}.".format(path))
+        with open(path, "rb") as f:
+            self._data_memory, self._targets_memory, self._herding_indexes, self._class_means, self._herding_val_indexes, self._val_memory = pickle.load(
+                f
+            )
+
+    def _after_task_intensive(self, inc_dataset):
         self._data_memory, self._targets_memory, self._herding_indexes, self._class_means = self.build_examplars(
             self.inc_dataset,
             self._herding_indexes,
             memory_per_class=int(self._memory_per_class * (1 - self._validation))
         )
-
-        self._old_model = self._network.copy().freeze()
-
         val_x, val_y, self._herding_val_indexes, _ = self.build_examplars(
             self.inc_dataset,
             self._herding_val_indexes,
             data_source="val",
-            memory_per_class=int(self._memory_per_class * self._validation)
+            memory_per_class=max(int(self._memory_per_class * self._validation), 1)
         )
         self._val_memory = (val_x, val_y)
+
+    def _after_task(self, inc_dataset):
+        self._old_model = self._network.copy().freeze()
 
         if self._task == 0:
             return
@@ -68,9 +94,10 @@ class BiC(ICarl):
         ypred, ytrue = [], []
 
         for input_dict in loader:
-            logits = self._network(input_dict["inputs"].to(self._device))
+            outputs = self._network(input_dict["inputs"].to(self._device))
+            logits = outputs["logits"]
             if self._task > 0:
-                logits = self._bic(logits)
+                outputs = self._bic(logits)
 
             logits = logits.detach()
 

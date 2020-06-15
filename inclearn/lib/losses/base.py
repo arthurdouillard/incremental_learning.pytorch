@@ -82,8 +82,8 @@ def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memo
     memory_old_confidence = old_confidence[memory_indexes]
     memory_targets = targets[memory_indexes]
 
-    right_old_confidence = memory_old_confidence[torch.arange(memory_old_confidence.
-                                                              shape[0]), memory_targets]
+    right_old_confidence = memory_old_confidence[torch.arange(memory_old_confidence.shape[0]),
+                                                 memory_targets]
     hard_indexes = right_old_confidence.le(0.5)
 
     factors = 2 * (1 + (1 - right_old_confidence[hard_indexes]))
@@ -105,7 +105,11 @@ def additive_margin_softmax_ce(
     scale=1,
     margin=0.,
     exclude_pos_denominator=False,
-    hinge_proxynca=False
+    hinge_proxynca=False,
+    memory_flags=None,
+    old_classes_temperature=None,
+    new_classes_lambda=None,
+    update_only_pos=False
 ):
     """Compute AMS cross-entropy loss.
 
@@ -116,30 +120,54 @@ def additive_margin_softmax_ce(
 
     :param similarities: Result of cosine similarities between weights and features.
     :param targets: Sparse targets.
-    :param s: Multiplicative factor, can be learned.
-    :param m: Margin applied on the "right" similarities.
+    :param scale: Multiplicative factor, can be learned.
+    :param margin: Margin applied on the "right" (numerator) similarities.
+    :param memory_flags: Flags indicating memory samples, although it could indicate
+                         anything else.
+    :param old_classes_temperature: Divide all old classes similarities by this constant.
+    :param new_classes_lambda: Multiply all new classes similarities that are in the
+                               numerator by this constant.
     :return: A float scalar loss.
     """
     margins = torch.zeros_like(similarities)
     margins[torch.arange(margins.shape[0]), targets] = margin
     similarities = scale * (similarities - margin)
 
+    if old_classes_temperature:
+        temps = torch.ones_like(similarities)
+        temps[memory_flags.bool()] = old_classes_temperature
+        similarities.div_(temps)
+
     if exclude_pos_denominator:
         similarities = similarities - similarities.max(1)[0].view(-1, 1)  # Stability
 
         disable_pos = torch.zeros_like(similarities)
-        disable_pos[torch.arange(len(similarities)), targets] = similarities[torch.arange(len(similarities)), targets]
+        disable_pos[torch.arange(len(similarities)),
+                    targets] = similarities[torch.arange(len(similarities)), targets]
 
         numerator = similarities[torch.arange(similarities.shape[0]), targets]
         denominator = similarities - disable_pos
 
-        loss = -torch.mean(numerator - torch.log(torch.exp(denominator).sum(-1)))
+        if new_classes_lambda is not None and memory_flags is not None:
+            lambdas = torch.ones_like(denominator)
+            lambdas[~memory_flags.bool()] = new_classes_lambda
+            denominator.mul_(lambdas)
+
+        if update_only_pos:
+            denominator = denominator.detach()
+
+        losses = numerator - torch.log(torch.exp(denominator).sum(-1))
+        if class_weights is not None:
+            losses = class_weights[targets] * losses
+
+        losses = -losses
         if hinge_proxynca:
-            loss = torch.clamp(loss, min=0.)
+            losses = torch.clamp(losses, min=0.)
+
+        loss = torch.mean(losses)
         return loss
 
     return F.cross_entropy(similarities, targets, weight=class_weights, reduction="mean")
-
 
 
 def embeddings_similarity(features_a, features_b):
@@ -165,9 +193,8 @@ def ucir_ranking(logits, targets, n_classes, task_size, nb_negatives=2, margin=0
 
     # 3. Getting top-k negative values:
     nb_old_classes = n_classes - task_size
-    negative_indexes = old_logits[..., nb_old_classes:].argsort(
-        dim=1, descending=True
-    )[..., :nb_negatives] + nb_old_classes
+    negative_indexes = old_logits[..., nb_old_classes:].argsort(dim=1, descending=True)[
+        ..., :nb_negatives] + nb_old_classes
     new_values = old_logits[torch.arange(len(old_logits)).view(-1, 1), negative_indexes].view(-1)
 
     return F.margin_ranking_loss(

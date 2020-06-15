@@ -1,9 +1,14 @@
 """Taken & slightly modified from:
 * https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py
 """
+import logging
+
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
+from inclearn.convnet.tools.conv_mtl import Conv2dMtl
 from torch.nn import functional as F
+
+logger = logging.getLogger(__name__)
 
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152']
 
@@ -18,12 +23,12 @@ model_urls = {
 
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
+    return Conv2dMtl(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
 
 def conv1x1(in_planes, out_planes, stride=1):
     """1x1 convolution"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+    return Conv2dMtl(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
 class BasicBlock(nn.Module):
@@ -104,21 +109,12 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(
-        self,
-        block,
-        layers,
-        zero_init_residual=True,
-        nf=16,
-        last_relu=False,
-        initial_kernel=3,
-        **kwargs
-    ):
+    def __init__(self, block, layers, zero_init_residual=True, nf=16, last_relu=False, **kwargs):
         super(ResNet, self).__init__()
 
         self.last_relu = last_relu
         self.inplanes = nf
-        self.conv1 = nn.Conv2d(3, nf, kernel_size=initial_kernel, stride=1, padding=1, bias=False)
+        self.conv1 = Conv2dMtl(3, nf, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(nf)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -132,7 +128,7 @@ class ResNet(nn.Module):
         print("Features dimension is {}.".format(self.out_dim))
 
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
+            if isinstance(m, Conv2dMtl):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
@@ -206,6 +202,50 @@ class ResNet(nn.Module):
             return F.relu(x)
         return x
 
+    def apply_mtl(self, b):
+        logger.info(f"Apply mtl: {b}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.apply_mtl = b
+
+    def apply_mtl_bias(self, b):
+        logger.info(f"Apply mtl bias: {b}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.apply_mtl_bias = b
+
+    def apply_bias_on_weights(self, b):
+        logger.info(f"Apply mtl bias on weights: {b}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.apply_bias_on_weights = b
+
+    def fuse_mtl_weights(self):
+        logger.info("Fuse mtl weights.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.fuse_mtl_weights()
+
+    def reset_mtl_parameters(self):
+        logger.info("Reset mtl weights.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.reset_mtl_parameters()
+
+    def freeze_convnet(self, freeze, bn_weights=False, bn_stats=False):
+        logger.info(f"Freeze convnet: {freeze}.")
+        for m in self.modules():
+            if isinstance(m, Conv2dMtl):
+                m.freeze_convnet(freeze)
+            elif isinstance(m, nn.BatchNorm2d):
+                if freeze and bn_stats:
+                    m.eval()
+                else:
+                    m.train()
+                if bn_weights:
+                    m.weight.requires_grad = not freeze
+                    m.bias.requires_grad = not freeze
+
 
 def resnet18(pretrained=False, **kwargs):
     """Constructs a ResNet-18 model.
@@ -215,11 +255,7 @@ def resnet18(pretrained=False, **kwargs):
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
     if pretrained:
-        print("Loading pretrained network")
-        state_dict = model_zoo.load_url(model_urls['resnet18'])
-        del state_dict["fc.weight"]
-        del state_dict["fc.bias"]
-        model.load_state_dict(state_dict)
+        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
     return model
 
 
@@ -260,12 +296,7 @@ def resnet101(pretrained=False, **kwargs):
     """
     model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
     if pretrained:
-        print("Loading pretrained network")
-        state_dict = model_zoo.load_url(model_urls['resnet101'])
-        del state_dict["fc.weight"]
-        del state_dict["fc.bias"]
-        model.load_state_dict(state_dict)
-        #model.load_state_dict(model_zoo.load_url(model_urls['resnet101']))
+        model.load_state_dict(model_zoo.load_url(model_urls['resnet101']))
     return model
 
 

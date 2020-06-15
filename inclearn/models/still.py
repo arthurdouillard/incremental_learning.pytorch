@@ -54,17 +54,15 @@ class STILL(ICarl):
         self._softmax_ce = args.get("softmax_ce", False)
 
         self._attention_residual_config = args.get("attention_residual", {})
+        self._spp_config = args.get("spatial_pyramid_pooling", {})
         self._sparsify_attentions = args.get("sparsify_attentions", None)
 
         self._perceptual_features = args.get("perceptual_features")
         self._perceptual_style = args.get("perceptual_style")
 
         self._groupwise_factors = args.get("groupwise_factors", {})
+        self._groupwise_factors_bis = args.get("groupwise_factors_bis", {})
         self._softtriple_config = args.get("softriple_regularizer", {})
-
-        if args.get("proxy_nca", False):
-            raise Exception("Use proxy_nca_config")
-        self._proxy_nca_config = args.get("proxy_nca_config", {})
 
         self._triplet_config = args.get("triplet_config", {})
         self._use_npair = args.get("use_npair", False)
@@ -120,6 +118,10 @@ class STILL(ICarl):
 
         self._weight_generation = args.get("weight_generation")
 
+        self._meta_transfer = args.get("meta_transfer", {})
+        if self._meta_transfer:
+            assert "mtl" in args["convnet"]
+
         self._saved_network = None
         self._post_processing_type = None
         self._data_memory, self._targets_memory = None, None
@@ -135,12 +137,24 @@ class STILL(ICarl):
         return self._memory_size // self._n_classes
 
     def _train_task(self, train_loader, val_loader):
+        if self._meta_transfer:
+            logger.info("Setting task meta-transfer")
+            self.set_meta_transfer()
+
         for p in self._network.parameters():
             if p.requires_grad:
                 p.register_hook(lambda grad: torch.clamp(grad, -5., 5.))
 
         logger.debug("nb {}.".format(len(train_loader.dataset)))
-        self._training_step(train_loader, val_loader, 0, self._n_epochs)
+
+        if self._meta_transfer.get("clip"):
+            logger.info(f"Clipping MTL weights ({self._meta_transfer.get('clip')}).")
+            clipper = BoundClipper(*self._meta_transfer.get("clip"))
+        else:
+            clipper = None
+        self._training_step(
+            train_loader, val_loader, 0, self._n_epochs, record_bn=True, clipper=clipper
+        )
 
         self._post_processing_type = None
 
@@ -196,8 +210,11 @@ class STILL(ICarl):
             )
             self._scheduler = None
             self._training_step(
-                loader, val_loader, self._n_epochs,
-                self._n_epochs + self._finetuning_config["epochs"]
+                loader,
+                val_loader,
+                self._n_epochs,
+                self._n_epochs + self._finetuning_config["epochs"],
+                record_bn=False
             )
 
     @property
@@ -219,9 +236,6 @@ class STILL(ICarl):
     def _after_task(self, inc_dataset):
         self._monitor_scale()
         if self._gradcam_distil:
-            self._data_memory, self._targets_memory, self._herding_indexes, self._class_means = self.build_examplars(
-                inc_dataset, self._herding_indexes
-            )
             self._network.zero_grad()
             self._network.unset_gradcam_hook()
             self._old_model = self._network.copy().eval().to(self._device)
@@ -355,17 +369,21 @@ class STILL(ICarl):
         logger.info("Now {} examplars per class.".format(self._memory_per_class))
 
         if self._groupwise_factors and isinstance(self._groupwise_factors, dict):
+            if self._groupwise_factors_bis and self._task > 0:
+                logger.info("Using second set of groupwise lr.")
+                groupwise_factor = self._groupwise_factors_bis
+            else:
+                groupwise_factor = self._groupwise_factors
+
             params = []
             for group_name, group_params in self._network.get_group_parameters().items():
-                if group_params is None:
+                if group_params is None or group_name == "last_block":
                     continue
-                params.append(
-                    {
-                        "params": group_params,
-                        "lr": self._lr * self._groupwise_factors.get(group_name, 1.0)
-                    }
-                )
-            #import pdb; pdb.set_trace()
+                factor = groupwise_factor.get(group_name, 1.0)
+                if factor == 0.:
+                    continue
+                params.append({"params": group_params, "lr": self._lr * factor})
+                print(f"Group: {group_name}, lr: {self._lr * factor}.")
         elif self._groupwise_factors == "ucir":
             params = [
                 {
@@ -421,6 +439,7 @@ class STILL(ICarl):
             loss = losses.additive_margin_softmax_ce(
                 logits,
                 targets,
+                memory_flags=memory_flags,
                 class_weights=self._class_weights,
                 focal_gamma=self._focal_loss_gamma,
                 **ams_config
@@ -511,6 +530,20 @@ class STILL(ICarl):
                 loss += attention_loss
                 self._metrics["att"] += attention_loss.item()
 
+            if self._spp_config:
+                if self._spp_config.get("scheduled_factor", False):
+                    factor = self._spp_config["scheduled_factor"] * math.sqrt(
+                        self._n_classes / self._task_size
+                    )
+                else:
+                    factor = self._spp_config.get("factor", 1.)
+
+                spp_loss = factor * losses.spatial_pyramid_pooling(
+                    old_atts, atts, **self._spp_config
+                )
+                loss += spp_loss
+                self._metrics["spp"] += spp_loss.item()
+
             if self._perceptual_features:
                 percep_feat = losses.perceptual_features_reconstruction(
                     old_atts, atts, **self._perceptual_features
@@ -537,9 +570,8 @@ class STILL(ICarl):
 
                 old_logits = old_outputs["logits"]
 
-                logits[..., :-self._task_size].backward(
-                    gradient=onehot_top_logits, retain_graph=True
-                )
+                logits[
+                    ..., :-self._task_size].backward(gradient=onehot_top_logits, retain_graph=True)
                 old_logits.backward(gradient=onehot_top_logits)
 
                 if len(outputs["gradcam_gradients"]) > 1:
@@ -587,3 +619,16 @@ class STILL(ICarl):
             self._metrics["rot"] += rotations_loss.item()
 
         return loss
+
+
+class BoundClipper:
+
+    def __init__(self, lower_bound, upper_bound):
+        self.lower_bound = lower_bound
+        self.upper_bound = upper_bound
+
+    def __call__(self, module):
+        if hasattr(module, "mtl_weight"):
+            module.mtl_weight.data.clamp_(min=self.lower_bound, max=self.upper_bound)
+        if hasattr(module, "mtl_bias"):
+            module.mtl_bias.data.clamp_(min=self.lower_bound, max=self.upper_bound)

@@ -1,12 +1,13 @@
 import copy
 import logging
 
+import torch
 from torch import nn
 
 from inclearn.lib import factory
 
-from .classifiers import Classifier, CosineClassifier, ProxyNCA
-from .postprocessors import FactorScalar, HeatedUpScalar
+from .classifiers import (Classifier, CosineClassifier, DomainClassifier, MCCosineClassifier)
+from .postprocessors import FactorScalar, HeatedUpScalar, InvertedFactorScalar
 from .word import Word2vec
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ class BasicNet(nn.Module):
 
         if postprocessor_kwargs.get("type") == "learned_scaling":
             self.post_processor = FactorScalar(**postprocessor_kwargs)
+        elif postprocessor_kwargs.get("type") == "inverted_learned_scaling":
+            self.post_processor = InvertedFactorScalar(**postprocessor_kwargs)
         elif postprocessor_kwargs.get("type") == "heatedup":
             self.post_processor = HeatedUpScalar(**postprocessor_kwargs)
         elif postprocessor_kwargs.get("type") is None:
@@ -54,8 +57,10 @@ class BasicNet(nn.Module):
             self.classifier = CosineClassifier(
                 self.convnet.out_dim, device=device, **classifier_kwargs
             )
-        elif classifier_kwargs["type"] == "proxynca":
-            self.classifier = ProxyNCA(self.convnet.out_dim, device=device, **classifier_kwargs)
+        elif classifier_kwargs["type"] == "mcdropout_cosine":
+            self.classifier = MCCosineClassifier(
+                self.convnet.out_dim, device=device, **classifier_kwargs
+            )
         else:
             raise ValueError("Unknown classifier type {}.".format(classifier_kwargs["type"]))
 
@@ -76,6 +81,8 @@ class BasicNet(nn.Module):
         self.attention_hook = attention_hook
         self.gradcam_hook = gradcam_hook
         self.device = device
+
+        self.domain_classifier = None
 
         if self.gradcam_hook:
             self._hooks = [None, None]
@@ -100,8 +107,11 @@ class BasicNet(nn.Module):
         if isinstance(self.post_processor, nn.Module):
             self.post_processor.on_epoch_end()
 
-    def forward(self, x):
-        if self.word_embeddings is not None and isinstance(x, list):
+    def forward(
+        self, x, rotation=False, index=None, features_processing=None, additional_features=None
+    ):
+        if hasattr(self,
+                   "word_embeddings") and self.word_embeddings is not None and isinstance(x, list):
             words = x[1]
             x = x[0]
         else:
@@ -111,16 +121,33 @@ class BasicNet(nn.Module):
         if words is not None:  # ugly to change
             outputs["word_embeddings"] = self.word_embeddings(words)
 
-        if self.classifier_no_act:
+        if hasattr(self, "classifier_no_act") and self.classifier_no_act:
             selected_features = outputs["raw_features"]
         else:
             selected_features = outputs["features"]
-        logits, raw_logits = self.classifier(selected_features)
 
-        outputs["logits"] = logits
-        outputs["raw_logits"] = raw_logits
+        if features_processing is not None:
+            selected_features = features_processing.fit_transform(selected_features)
 
-        if self.gradcam_hook:
+        if rotation:
+            outputs["rotations"] = self.rotations_predictor(outputs["features"])
+            nb_inputs = len(x) // 4
+            #for k in outputs.keys():
+            #    if k != "rotations":
+            #        if isinstance(outputs[k], list):
+            #            outputs[k] = [elt[:32] for elt in outputs[k]]
+            #        else:
+            #            outputs[k] = outputs[k][:32]
+        else:
+            if additional_features is not None:
+                clf_outputs = self.classifier(
+                    torch.cat((selected_features, additional_features), 0)
+                )
+            else:
+                clf_outputs = self.classifier(selected_features)
+            outputs.update(clf_outputs)
+
+        if hasattr(self, "gradcam_hook") and self.gradcam_hook:
             outputs["gradcam_gradients"] = self._gradcam_gradients
             outputs["gradcam_activations"] = self._gradcam_activations
 
@@ -136,16 +163,14 @@ class BasicNet(nn.Module):
         return self.convnet.out_dim
 
     def add_classes(self, n_classes):
-        if hasattr(self.classifier, "add_classes"):
-            self.classifier.add_classes(n_classes)
+        self.classifier.add_classes(n_classes)
 
     def add_imprinted_classes(self, class_indexes, inc_dataset, **kwargs):
         if hasattr(self.classifier, "add_imprinted_classes"):
             self.classifier.add_imprinted_classes(class_indexes, inc_dataset, self, **kwargs)
 
-    def add_custom_weights(self, weights):
-        if hasattr(self.classifier, "add_custom_weights"):
-            self.classifier.add_custom_weights(weights)
+    def add_custom_weights(self, weights, **kwargs):
+        self.classifier.add_custom_weights(weights, **kwargs)
 
     def extract(self, x):
         outputs = self.convnet(x)
@@ -156,7 +181,7 @@ class BasicNet(nn.Module):
     def predict_rotations(self, inputs):
         if self.rotations_predictor is None:
             raise ValueError("Enable the rotations predictor.")
-        return self.rotations_predictor(self.convnet(inputs, attention_hook=self.attention_hook)[1])
+        return self.rotations_predictor(self.convnet(inputs)["features"])
 
     def freeze(self, trainable=False, model="all"):
         if model == "all":
@@ -173,7 +198,7 @@ class BasicNet(nn.Module):
 
         for param in model.parameters():
             param.requires_grad = trainable
-        if self.gradcam_hook and model == "convnet":
+        if hasattr(self, "gradcam_hook") and self.gradcam_hook and model == "convnet":
             for param in self.convnet.last_conv.parameters():
                 param.requires_grad = True
 
@@ -187,14 +212,21 @@ class BasicNet(nn.Module):
     def get_group_parameters(self):
         groups = {"convnet": self.convnet.parameters()}
 
-        #if isinstance(self.classifier, nn.Module):
-        #    groups["classifier"] = self.classifier.parameters()
         if isinstance(self.post_processor, FactorScalar):
             groups["postprocessing"] = self.post_processor.parameters()
         if hasattr(self.classifier, "new_weights"):
             groups["new_weights"] = self.classifier.new_weights
         if hasattr(self.classifier, "old_weights"):
             groups["old_weights"] = self.classifier.old_weights
+        if self.rotations_predictor:
+            groups["rotnet"] = self.rotations_predictor.parameters()
+        if hasattr(self.convnet, "last_block"):
+            groups["last_block"] = self.convnet.last_block.parameters()
+        if hasattr(self.classifier, "_negative_weights"
+                  ) and isinstance(self.classifier._negative_weights, nn.Parameter):
+            groups["neg_weights"] = self.classifier._negative_weights
+        if self.domain_classifier is not None:
+            groups["domain_clf"] = self.domain_classifier.parameters()
 
         return groups
 
@@ -225,3 +257,10 @@ class BasicNet(nn.Module):
 
         self._hooks[0] = self.convnet.last_conv.register_backward_hook(backward_hook)
         self._hooks[1] = self.convnet.last_conv.register_forward_hook(forward_hook)
+
+    def create_domain_classifier(self):
+        self.domain_classifier = DomainClassifier(self.convnet.out_dim, device=self.device)
+        return self.domain_classifier
+
+    def del_domain_classifier(self):
+        self.domain_classifier = None

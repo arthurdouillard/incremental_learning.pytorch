@@ -1,6 +1,7 @@
 import copy
 import logging
 
+import numpy as np
 import torch
 from sklearn.cluster import KMeans
 from torch import nn
@@ -17,19 +18,19 @@ logger = logging.getLogger(__name__)
 class Classifier(nn.Module):
 
     def __init__(
-        self, features_dim, *, use_bias, use_multi_fc=False, init="kaiming", device, **kwargs
+        self, features_dim, device, *, use_bias=False, normalize=False, init="kaiming", **kwargs
     ):
         super().__init__()
 
         self.features_dim = features_dim
         self.use_bias = use_bias
-        self.use_multi_fc = use_multi_fc
-        self.init = init
+        self.init_method = init
         self.device = device
+        self.normalize = normalize
+        self._weights = nn.ParameterList([])
+        self._bias = nn.ParameterList([]) if self.use_bias else None
 
         self.n_classes = 0
-
-        self.classifier = None
 
     def on_task_end(self):
         pass
@@ -37,59 +38,79 @@ class Classifier(nn.Module):
     def on_epoch_end(self):
         pass
 
+    @property
+    def weights(self):
+        return torch.cat([w for w in self._weights])
+
+    @property
+    def new_weights(self):
+        return self._weights[-1]
+
+    @property
+    def old_weights(self):
+        if len(self._weights) > 1:
+            return self._weights[:-1]
+        return None
+
+    @property
+    def bias(self):
+        if self._bias is not None:
+            return torch.cat([b for b in self._bias])
+        return None
+
+    @property
+    def new_bias(self):
+        return self._bias[-1]
+
+    @property
+    def old_bias(self):
+        if len(self._bias) > 1:
+            return self._bias[:-1]
+        return None
+
     def forward(self, features):
-        if self.classifier is None:
+        if len(self._weights) == 0:
             raise Exception("Add some classes before training.")
 
-        if self.use_multi_fc:
-            logits = []
-            for classifier in self.classifier:
-                logits.append(classifier(features))
-            logits = torch.cat(logits, 1)
-        else:
-            logits = self.classifier(features)
+        if self.normalize:
+            features = F.normalize(features, dim=1, p=2)
 
-        return logits, None
+        logits = F.linear(features, self.weights, bias=self.bias)
+        return {"logits": logits}
 
     def add_classes(self, n_classes):
-        if self.use_multi_fc:
-            self._add_classes_multi_fc(n_classes)
-        else:
-            self._add_classes_single_fc(n_classes)
+        self._weights.append(nn.Parameter(torch.randn(n_classes, self.features_dim)))
+        self._init(self.init_method, self.new_weights)
 
-        self.n_classes += n_classes
-
-    def _add_classes_multi_fc(self, n_classes):
-        if self.classifier is None:
-            self.classifier = nn.ModuleList([])
-
-        new_classifier = self._gen_classifier(n_classes)
-        self.classifier.append(new_classifier)
-
-    def _add_classes_single_fc(self, n_classes):
-        if self.classifier is not None:
-            weight = copy.deepcopy(self.classifier.weight.data)
-            if self.use_bias:
-                bias = copy.deepcopy(self.classifier.bias.data)
-
-        classifier = self._gen_classifier(self.n_classes + n_classes)
-
-        if self.classifier is not None:
-            classifier.weight.data[:self.n_classes] = weight
-            if self.use_bias:
-                classifier.bias.data[:self.n_classes] = bias
-
-        del self.classifier
-        self.classifier = classifier
-
-    def _gen_classifier(self, n_classes):
-        classifier = nn.Linear(self.features_dim, n_classes, bias=self.use_bias).to(self.device)
-        if self.init == "kaiming":
-            nn.init.kaiming_normal_(classifier.weight, nonlinearity="linear")
         if self.use_bias:
-            nn.init.constant_(classifier.bias, 0.)
+            self._bias.append(nn.Parameter(torch.randn(n_classes)))
+            self._init(0., self.new_bias)
 
-        return classifier
+        self.to(self.device)
+
+    @staticmethod
+    def _init(init_method, parameters):
+        if isinstance(init_method, float) or isinstance(init_method, int):
+            nn.init.constant_(parameters, init_method)
+        elif init_method == "kaiming":
+            nn.init.kaiming_normal_(parameters, nonlinearity="linear")
+        else:
+            raise NotImplementedError("Unknown initialization method: {}.".format(init_method))
+
+    def align_weights(self):
+        """Align new weights based on old weights norm.
+
+        # Reference:
+            * Maintaining Discrimination and Fairness in Class Incremental Learning
+              Zhao et al. 2019
+        """
+        with torch.no_grad():
+            old_weights = torch.cat([w for w in self.old_weights])
+
+            old_norm = torch.mean(old_weights.norm(dim=1))
+            new_norm = torch.mean(self.new_weights.norm(dim=1))
+
+            self._weights[-1] = nn.Parameter((old_norm / new_norm) * self._weights[-1])
 
 
 class CosineClassifier(nn.Module):
@@ -102,10 +123,14 @@ class CosineClassifier(nn.Module):
         proxy_per_class=1,
         distance="cosine",
         merging="softmax",
-        scaling=1.,
+        scaling=1,
         gamma=1.,
         use_bias=False,
         type=None,
+        pre_fc=None,
+        negative_weights_bias=None,
+        train_negative_weights=False,
+        eval_negative_weights=False
     ):
         super().__init__()
 
@@ -119,13 +144,30 @@ class CosineClassifier(nn.Module):
         self.merging = merging
         self.gamma = gamma
 
-        if isinstance(scaling, int):
+        self.negative_weights_bias = negative_weights_bias
+        self.train_negative_weights = train_negative_weights
+        self.eval_negative_weights = eval_negative_weights
+
+        self._negative_weights = None
+        self.use_neg_weights = True
+
+        if isinstance(scaling, int) or isinstance(scaling, float):
             self.scaling = scaling
         else:
+            logger.warning("Using inner learned scaling")
             self.scaling = FactorScalar(1.)
 
         if proxy_per_class > 1:
             logger.info("Using {} proxies per class.".format(proxy_per_class))
+
+        if pre_fc is not None:
+            self.pre_fc = nn.Sequential(
+                nn.ReLU(inplace=True), nn.BatchNorm1d(self.features_dim),
+                nn.Linear(self.features_dim, pre_fc)
+            )
+            self.features_dim = pre_fc
+        else:
+            self.pre_fc = None
 
         self._task_idx = 0
 
@@ -139,23 +181,37 @@ class CosineClassifier(nn.Module):
             self.scaling.on_epoch_end()
 
     def forward(self, features):
+        if hasattr(self, "pre_fc") and self.pre_fc is not None:
+            features = self.pre_fc(features)
+
+        weights = self.weights
+        if self._negative_weights is not None and (
+            self.training is True or self.eval_negative_weights
+        ) and self.use_neg_weights:
+            weights = torch.cat((weights, self._negative_weights), 0)
+
         if self.distance == "cosine":
-            raw_similarities = distance_lib.cosine_similarity(features, self.weights)
+            raw_similarities = distance_lib.cosine_similarity(features, weights)
         elif self.distance == "stable_cosine_distance":
             features = self.scaling * F.normalize(features, p=2, dim=-1)
-            weights = self.scaling * F.normalize(self.weights, p=2, dim=-1)
+            weights = self.scaling * F.normalize(weights, p=2, dim=-1)
 
             raw_similarities = distance_lib.stable_cosine_distance(features, weights)
         elif self.distance == "neg_stable_cosine_distance":
             features = self.scaling * F.normalize(features, p=2, dim=-1)
-            weights = self.scaling * F.normalize(self.weights, p=2, dim=-1)
+            weights = self.scaling * F.normalize(weights, p=2, dim=-1)
 
             raw_similarities = -distance_lib.stable_cosine_distance(features, weights)
         elif self.distance == "prelu_stable_cosine_distance":
             features = self.scaling * F.normalize(F.relu(features), p=2, dim=-1)
-            weights = self.scaling * F.normalize(self.weights, p=2, dim=-1)
+            weights = self.scaling * F.normalize(weights, p=2, dim=-1)
 
             raw_similarities = distance_lib.stable_cosine_distance(features, weights)
+        elif self.distance == "prelu_neg_stable_cosine_distance":
+            features = self.scaling * F.normalize(F.relu(features), p=2, dim=-1)
+            weights = self.scaling * F.normalize(weights, p=2, dim=-1)
+
+            raw_similarities = -distance_lib.stable_cosine_distance(features, weights)
         else:
             raise NotImplementedError("Unknown distance function {}.".format(self.distance))
 
@@ -164,28 +220,130 @@ class CosineClassifier(nn.Module):
         else:
             similarities = raw_similarities
 
-        return similarities, raw_similarities
+            if self._negative_weights is not None and self.negative_weights_bias is not None and\
+               self.training is True:
+                qt = self._negative_weights.shape[0]
+                if isinstance(self.negative_weights_bias, float):
+                    similarities[..., -qt:] = torch.clamp(
+                        similarities[..., -qt:] - self.negative_weights_bias, min=0
+                    )
+                elif isinstance(
+                    self.negative_weights_bias, str
+                ) and self.negative_weights_bias == "min":
+                    min_simi = similarities[..., :-qt].min(dim=1, keepdim=True)[0]
+                    similarities = torch.min(
+                        similarities,
+                        torch.cat((similarities[..., :-qt], min_simi.repeat(1, qt)), dim=1)
+                    )
+                elif isinstance(
+                    self.negative_weights_bias, str
+                ) and self.negative_weights_bias == "max":
+                    max_simi = similarities[..., :-qt].max(dim=1, keepdim=True)[0] - 1e-6
+                    similarities = torch.min(
+                        similarities,
+                        torch.cat((similarities[..., :-qt], max_simi.repeat(1, qt)), dim=1)
+                    )
+                elif isinstance(self.negative_weights_bias,
+                                str) and self.negative_weights_bias.startswith("top_"):
+                    topk = int(self.negative_weights_bias.replace("top_", ""))
+                    botk = min(qt - topk, qt)
+
+                    indexes = (-similarities[..., -qt:]).topk(botk, dim=1)[1]
+                    similarities[..., -qt:].scatter_(1, indexes, 0.)
+                else:
+                    raise NotImplementedError(f"Unknown {self.negative_weights_bias}.")
+
+        return {"logits": similarities, "raw_logits": raw_similarities}
 
     def _reduce_proxies(self, similarities):
         # shape (batch_size, n_classes * proxy_per_class)
-        assert similarities.shape[1] == self.n_classes * self.proxy_per_class
+        n_classes = similarities.shape[1] / self.proxy_per_class
+        assert n_classes.is_integer(), (similarities.shape[1], self.proxy_per_class)
+        n_classes = int(n_classes)
+        bs = similarities.shape[0]
 
         if self.merging == "mean":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).mean(-1)
+            return similarities.view(bs, n_classes, self.proxy_per_class).mean(-1)
         elif self.merging == "softmax":
-            simi_per_class = similarities.view(-1, self.n_classes, self.proxy_per_class)
+            simi_per_class = similarities.view(bs, n_classes, self.proxy_per_class)
             attentions = F.softmax(self.gamma * simi_per_class, dim=-1)  # shouldn't be -gamma?
             return (simi_per_class * attentions).sum(-1)
         elif self.merging == "max":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).max(-1)[0]
+            return similarities.view(bs, n_classes, self.proxy_per_class).max(-1)[0]
         elif self.merging == "min":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).min(-1)[0]
+            return similarities.view(bs, n_classes, self.proxy_per_class).min(-1)[0]
         else:
             raise ValueError("Unknown merging for multiple centers: {}.".format(self.merging))
 
     # ------------------
     # Weights management
     # ------------------
+
+    def align_features(self, features):
+        avg_weights_norm = self.weights.data.norm(dim=1).mean()
+        avg_features_norm = features.data.norm(dim=1).mean()
+
+        features.data = features.data * (avg_weights_norm / avg_features_norm)
+        return features
+
+    def add_custom_weights(self, weights, ponderate=None, **kwargs):
+        if isinstance(ponderate, str):
+            if ponderate == "weights_imprinting":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                weights = weights * avg_weights_norm
+            elif ponderate == "align_weights":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                avg_new_weights_norm = weights.data.norm(dim=1).mean()
+
+                ratio = avg_weights_norm / avg_new_weights_norm
+                weights = weights * ratio
+            else:
+                raise NotImplementedError(f"Unknown ponderation type {ponderate}.")
+
+        self._weights.append(nn.Parameter(weights))
+        self.to(self.device)
+
+    def align_weights(self):
+        """Align new weights based on old weights norm.
+
+        # Reference:
+            * Maintaining Discrimination and Fairness in Class Incremental Learning
+              Zhao et al. 2019
+        """
+        if len(self._weights) == 1:
+            return
+
+        with torch.no_grad():
+            old_weights = torch.cat([w for w in self.old_weights])
+
+            old_norm = torch.mean(old_weights.norm(dim=1))
+            new_norm = torch.mean(self.new_weights.norm(dim=1))
+
+            self._weights[-1] = nn.Parameter((old_norm / new_norm) * self._weights[-1])
+
+    def align_weights_i_to_j(self, indexes_i, indexes_j):
+        with torch.no_grad():
+            base_weights = self.weights[indexes_i]
+
+            old_norm = torch.mean(base_weights.norm(dim=1))
+            new_norm = torch.mean(self.weights[indexes_j].norm(dim=1))
+
+            self.weights[indexes_j] = nn.Parameter((old_norm / new_norm) * self.weights[indexes_j])
+
+    def align_inv_weights(self):
+        """Align new weights based on old weights norm.
+
+        # Reference:
+            * Maintaining Discrimination and Fairness in Class Incremental Learning
+              Zhao et al. 2019
+        """
+        with torch.no_grad():
+            old_weights = torch.cat([w for w in self.old_weights])
+
+            old_norm = torch.mean(old_weights.norm(dim=1))
+            new_norm = torch.mean(self.new_weights.norm(dim=1))
+
+            self._weights[-1] = nn.Parameter((new_norm / old_norm) * self._weights[-1])
 
     @property
     def weights(self):
@@ -256,241 +414,151 @@ class CosineClassifier(nn.Module):
 
         return self
 
+    def set_negative_weights(self, negative_weights, ponderate=False):
+        """Add weights that are used like the usual weights, but aren't actually
+        parameters.
 
-class ProxyNCA(CosineClassifier):
-    __slots__ = ("weights",)
+        :param negative_weights: Tensor of shape (n_classes * nb_proxy, features_dim)
+        :param ponderate: Reponderate the negative weights by the existing weights norm, as done by
+                          "Weights Imprinting".
+        """
+        logger.info("Add negative weights.")
+        if isinstance(ponderate, str):
+            if ponderate == "weights_imprinting":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                negative_weights = negative_weights * avg_weights_norm
+            elif ponderate == "align_weights":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                avg_negative_weights_norm = negative_weights.data.norm(dim=1).mean()
 
-    def __init__(
-        self,
-        *args,
-        use_scaling=False,
-        pre_relu=False,
-        linear_end_relu=False,
-        linear=False,
-        mulfactor=3,
-        gamma=1,
-        merging="mean",
-        metric="custom_distance",
-        square_dist=True,
-        **kwargs
-    ):
+                ratio = avg_weights_norm / avg_negative_weights_norm
+                negative_weights = negative_weights * ratio
+            elif ponderate == "inv_align_weights":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                avg_negative_weights_norm = negative_weights.data.norm(dim=1).mean()
+
+                ratio = avg_negative_weights_norm / avg_weights_norm
+                negative_weights = negative_weights * ratio
+            else:
+                raise NotImplementedError(f"Unknown ponderation type {ponderate}.")
+
+        if self.train_negative_weights:
+            self._negative_weights = nn.Parameter(negative_weights)
+        else:
+            self._negative_weights = negative_weights
+
+
+class MCCosineClassifier(CosineClassifier):
+    """CosineClassifier with MC-Dropout."""
+
+    def __init__(self, *args, dropout=0.2, nb_samples=10, **kwargs):
         super().__init__(*args, **kwargs)
 
-        if use_scaling is True:
-            self._scaling = FactorScalar(1.)
-        elif use_scaling == "heatedup":
-            self._scaling = HeatedUpScalar(16, 4, 6)
-        elif isinstance(use_scaling, float):
-            self._scaling = lambda x: use_scaling * x
-        else:
-            self._scaling = lambda x: x
+        self._dropout = dropout
+        self.nb_samples = nb_samples
 
-        self.use_bias = False
-        if linear:
-            self.linear = nn.Sequential(
-                nn.BatchNorm1d(self.features_dim), nn.ReLU(inplace=True),
-                nn.Linear(self.features_dim, linear)
-            )
-            self.features_dim = linear
-        else:
-            self.linear = lambda x: x
+    def forward(self, x):
+        if self.training:
+            return super().forward(F.dropout(x, p=self._dropout))
 
-        self.square_dist = square_dist
-        self.gamma = gamma
-        self.metric = metric
-        print(metric)
-        self.merging = merging
-        self.mulfactor = mulfactor
-        self.linear_end_relu = linear_end_relu
-        self.pre_relu = pre_relu
-        print("Proxy nca")
+        sampled_similarities = torch.zeros(x.shape[0], self.nb_samples,
+                                           self.n_classes).to(x.device).float()
+        for i in range(self.nb_samples):
+            similarities = super().forward(F.dropout(x, p=self._dropout))["logits"]
+            sampled_similarities[:, i] = similarities
 
-        self.weights = None
+        return {
+            "logits": sampled_similarities.mean(dim=1),
+            "var_ratio": self.var_ratio(sampled_similarities)
+        }
 
-    def on_task_end(self):
-        super().on_task_end()
-        if isinstance(self._scaling, nn.Module):
-            self._scaling.on_task_end()
+    def var_ratio(self, sampled_similarities):
+        predicted_class = sampled_similarities.max(dim=2)[1].cpu().numpy()
 
-    def forward(self, features):
-        if isinstance(self.pre_relu, float):
-            features = F.leaky_relu(features, self.pre_relu)
-        elif self.pre_relu:
-            features = F.relu(features)
-        features = self.linear(features)
-        if self.linear_end_relu:
-            features = F.relu(features)
-
-        P = self.weights
-        P = self.mulfactor * F.normalize(P, p=2, dim=-1)
-        X = self.mulfactor * F.normalize(features, p=2, dim=-1)
-
-        if self.metric == "custom_distance":
-            D = self.pairwise_distance(torch.cat(
-                [X, P]
-            ), squared=self.square_dist)[:X.size()[0], X.size()[0]:]
-        elif self.metric == "neg_custom_distance":
-            D = -self.pairwise_distance(torch.cat(
-                [X, P]
-            ), squared=self.square_dist)[:X.size()[0], X.size()[0]:]
-        elif self.metric == "distance":
-            D = torch.cdist(X, P)**2
-        elif self.metric == "cosine":
-            D = torch.mm(X, P.t())
-        else:
-            raise ValueError("Unknown metric {}.".format(self.metric))
-
-        if self.proxy_per_class > 1:
-            D = self._reduce_proxies(D)
-
-        return self._scaling(D)
-
-    def _reduce_proxies(self, similarities):
-        # shape (batch_size, n_classes * proxy_per_class)
-        assert similarities.shape[1] == self.n_classes * self.proxy_per_class
-
-        if self.merging == "mean":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).mean(-1)
-        elif self.merging == "softmax":
-            simi_per_class = similarities.view(-1, self.n_classes, self.proxy_per_class)
-            attentions = F.softmax(self.gamma * simi_per_class, dim=-1)  # shouldn't be -gamma?
-            return (simi_per_class * attentions).sum(-1)
-        elif self.merging == "max":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).max(-1)[0]
-        elif self.merging == "min":
-            return similarities.view(-1, self.n_classes, self.proxy_per_class).min(-1)[0]
-        else:
-            raise ValueError("Unknown merging for multiple centers: {}.".format(self.merging))
-
-    @staticmethod
-    def pairwise_distance(a, squared=False):
-        """Computes the pairwise distance matrix with numerical stability."""
-        pairwise_distances_squared = torch.add(
-            a.pow(2).sum(dim=1, keepdim=True).expand(a.size(0), -1),
-            torch.t(a).pow(2).sum(dim=0, keepdim=True).expand(a.size(0), -1)
-        ) - 2 * (torch.mm(a, torch.t(a)))
-
-        # Deal with numerical inaccuracies. Set small negatives to zero.
-        pairwise_distances_squared = torch.clamp(pairwise_distances_squared, min=0.0)
-
-        # Get the mask where the zero distances are at.
-        error_mask = torch.le(pairwise_distances_squared, 0.0)
-
-        # Optionally take the sqrt.
-        if squared:
-            pairwise_distances = pairwise_distances_squared
-        else:
-            pairwise_distances = torch.sqrt(pairwise_distances_squared + error_mask.float() * 1e-16)
-
-        # Undo conditionally adding 1e-16.
-        pairwise_distances = torch.mul(pairwise_distances, (error_mask == False).float())
-
-        # Explicitly set diagonals to zero.
-        mask_offdiagonals = 1 - torch.eye(
-            *pairwise_distances.size(), device=pairwise_distances.device
+        hist = np.array(
+            [
+                np.histogram(predicted_class[i, :], range=(0, 10))[0]
+                for i in range(predicted_class.shape[0])
+            ]
         )
-        pairwise_distances = torch.mul(pairwise_distances, mask_offdiagonals)
 
-        return pairwise_distances
+        return 1. - hist.max(axis=1) / self.nb_samples
 
-    def add_custom_weights(self, weights):
-        weights = torch.tensor(weights)
 
-        if self.weights is not None:
-            placeholder = nn.Parameter(
-                torch.zeros(self.weights.shape[0] + weights.shape[0], self.features_dim)
-            )
-            placeholder.data[:self.weights.shape[0]] = copy.deepcopy(self.weights.data)
-            placeholder.data[self.weights.shape[0]:] = weights
+class CosineM2KDClassifier(CosineClassifier):
 
-            self.weights = placeholder
-        else:
-            self.weights = weights
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        self.to(self.device)
+        self._auxilliary_weights = nn.ParameterList([])
+        self.auxilliary_features_dim = 64 * 8 * 8  # Hard coded penultimate residual block
+        # Only work on ResNet34-rebuffi with nf=16
 
-    def add_classes(self, n_classes):
-        new_weights = nn.Parameter(
-            torch.zeros(self.proxy_per_class * (self.n_classes + n_classes), self.features_dim)
-        )
+    def add_imprinted_classes(self, class_indexes, *args, **kwargs):
+        super().add_imprinted_classes(class_indexes, *args, **kwargs)
+        self.add_classes_to_auxilliary(len(class_indexes))
+
+    def add_classes_to_auxilliary(self, n_classes):
+        new_weights = nn.Parameter(torch.zeros(n_classes, self.auxilliary_features_dim))
         nn.init.kaiming_normal_(new_weights, nonlinearity="linear")
 
-        if self.weights is not None:
-            new_weights.data[:self.n_classes *
-                             self.proxy_per_class] = copy.deepcopy(self.weights.data)
-
-        del self.weights
-        self.weights = new_weights
-
-        if self.use_bias:
-            new_bias = nn.Parameter(
-                torch.zeros(self.proxy_per_class * (self.n_classes + n_classes))
-            )
-            nn.init.constant_(new_bias, 0.1)
-            if self.bias is not None:
-                new_bias.data[:self.n_classes *
-                              self.proxy_per_class] = copy.deepcopy(self.bias.data)
-
-            del self.bias
-            self.bias = new_bias
+        self._auxilliary_weights.append(new_weights)
 
         self.to(self.device)
-        self.n_classes += n_classes
         return self
 
-    def add_imprinted_classes(
-        self,
-        class_indexes,
-        inc_dataset,
-        network,
-        use_weights_norm=True,
-        multi_class_diff="normal",
-        **kwargs
-    ):
-        if self.proxy_per_class > 1:
-            print("Multi class diff {}.".format(multi_class_diff))
+    @property
+    def auxilliary_weights(self):
+        return torch.cat([clf for clf in self._weights])
 
-        # We are assuming the class indexes are contiguous!
-        n_classes = self.n_classes
-        self.add_classes(len(class_indexes))
-        if n_classes == 0:
-            return
+    @property
+    def new_weights(self):
+        return torch.cat([self._weights[-1], self._auxilliary_weights[-1]])
 
-        weights_norm = self.weights.data.norm(dim=1, keepdim=True)
-        avg_weights_norm = torch.mean(weights_norm, dim=0).cpu()
-        if not use_weights_norm:
-            print("Not using avg weight norm")
-            avg_weights_norm = torch.ones_like(avg_weights_norm)
+    @property
+    def old_weights(self):
+        if len(self._weights) > 1:
+            return torch.cat([self._weights[:-1], self._auxilliary_weights[:-1]])
+        return None
 
-        new_weights = []
-        for class_index in class_indexes:
-            _, loader = inc_dataset.get_custom_loader([class_index])
-            features, _ = utils.extract_features(network, loader)
 
-            features_normalized = F.normalize(torch.from_numpy(features), p=2, dim=1)
-            class_embeddings = torch.mean(features_normalized, dim=0)
-            class_embeddings = F.normalize(class_embeddings, dim=0, p=2)
+class DomainClassifier(nn.Module):
 
-            if self.proxy_per_class == 1:
-                new_weights.append(class_embeddings * avg_weights_norm)
-            else:
-                if multi_class_diff == "normal":
-                    std = torch.std(features_normalized, dim=0)
-                    for _ in range(self.proxy_per_class):
-                        new_weights.append(torch.normal(class_embeddings, std) * avg_weights_norm)
-                elif multi_class_diff == "kmeans":
-                    clusterizer = KMeans(n_clusters=self.proxy_per_class)
-                    clusterizer.fit(features_normalized.numpy())
+    def __init__(self, features_dim, device=None):
+        super().__init__()
 
-                    for center in clusterizer.cluster_centers_:
-                        new_weights.append(torch.tensor(center) * avg_weights_norm)
-                else:
-                    raise ValueError(
-                        "Unknown multi class differentiation for imprinted weights: {}.".
-                        format(multi_class_diff)
-                    )
+        self.features_dim = features_dim
+        self.device = device
 
-        new_weights = torch.stack(new_weights)
-        self.weights.data[-new_weights.shape[0]:] = new_weights.to(self.device)
+        self.gradreverse = GradReverse.apply
+        self.linear = nn.Linear(features_dim, 1)
 
-        return self
+        self.to(device)
+
+    def forward(self, x):
+        return self.linear(self.gradreverse(x))
+
+
+class GradReverse(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg()
+
+
+class BinaryCosineClassifier(nn.Module):
+
+    def __init__(self, features_dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(1, features_dim))
+        nn.init.kaiming_normal_(self.weight, nonlinearity="linear")
+
+    def forward(self, x):
+        x = F.normalize(x, dim=1, p=2)
+        w = F.normalize(self.weight, dim=1, p=2)
+
+        return {"logits": torch.mm(x, w.T)}

@@ -6,15 +6,14 @@ import pickle
 
 import numpy as np
 import torch
+from inclearn.lib import factory, herding, losses, network, schedulers, utils
+from inclearn.lib.network import hook
+from inclearn.models.base import IncrementalLearner
 from scipy.spatial.distance import cdist
 from sklearn.metrics import confusion_matrix
 from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
-
-from inclearn.lib import factory, herding, losses, network, schedulers, utils
-from inclearn.lib.network import hook
-from inclearn.models.base import IncrementalLearner
 
 EPSILON = 1e-8
 
@@ -82,7 +81,7 @@ class ICarl(IncrementalLearner):
 
         self._examplars = {}
         self._means = None
-
+        self._herding_indexes = []
         self._data_memory, self._targets_memory = None, None
 
         self._old_model = None
@@ -90,19 +89,65 @@ class ICarl(IncrementalLearner):
         self._clf_loss = F.binary_cross_entropy_with_logits
         self._distil_loss = F.binary_cross_entropy_with_logits
 
-        self._herding_indexes = []
-
         self._epoch_metrics = collections.defaultdict(list)
 
-    def save_metadata(self, path):
+        self._meta_transfer = args.get("meta_transfer", {})
+
+    def set_meta_transfer(self):
+        if self._meta_transfer["type"] not in ("repeat", "once", "none"):
+            raise ValueError(f"Invalid value for meta-transfer {self._meta_transfer}.")
+
+        if self._task == 0:
+            self._network.convnet.apply_mtl(False)
+        elif self._task == 1:
+            if self._meta_transfer["type"] != "none":
+                self._network.convnet.apply_mtl(True)
+
+            if self._meta_transfer.get("mtl_bias"):
+                self._network.convnet.apply_mtl_bias(True)
+            elif self._meta_transfer.get("bias_on_weight"):
+                self._network.convnet.apply_bias_on_weights(True)
+
+            if self._meta_transfer["freeze_convnet"]:
+                self._network.convnet.freeze_convnet(
+                    True,
+                    bn_weights=self._meta_transfer.get("freeze_bn_weights"),
+                    bn_stats=self._meta_transfer.get("freeze_bn_stats")
+                )
+        elif self._meta_transfer["type"] != "none":
+            if self._meta_transfer["type"] == "repeat" or (
+                self._task == 2 and self._meta_transfer["type"] == "once"
+            ):
+                self._network.convnet.fuse_mtl_weights()
+                self._network.convnet.reset_mtl_parameters()
+
+                if self._meta_transfer["freeze_convnet"]:
+                    self._network.convnet.freeze_convnet(
+                        True,
+                        bn_weights=self._meta_transfer.get("freeze_bn_weights"),
+                        bn_stats=self._meta_transfer.get("freeze_bn_stats")
+                    )
+
+    def save_metadata(self, directory, run_id):
+        path = os.path.join(directory, f"meta_{run_id}_task_{self._task}.pkl")
+
         logger.info("Saving metadata at {}.".format(path))
         with open(path, "wb+") as f:
-            pickle.dump(self._herding_indexes, f)
+            pickle.dump(
+                [self._data_memory, self._targets_memory, self._herding_indexes, self._class_means],
+                f
+            )
 
-    def load_metadata(self, path):
+    def load_metadata(self, directory, run_id):
+        path = os.path.join(directory, f"meta_{run_id}_task_{self._task}.pkl")
+        if not os.path.exists(path):
+            return
+
         logger.info("Loading metadata at {}.".format(path))
         with open(path, "rb") as f:
-            self._herding_indexes = pickle.load(f)
+            self._data_memory, self._targets_memory, self._herding_indexes, self._class_means = pickle.load(
+                f
+            )
 
     @property
     def epoch_metrics(self):
@@ -142,7 +187,9 @@ class ICarl(IncrementalLearner):
         logger.debug("nb {}.".format(len(train_loader.dataset)))
         self._training_step(train_loader, val_loader, 0, self._n_epochs)
 
-    def _training_step(self, train_loader, val_loader, initial_epoch, nb_epochs):
+    def _training_step(
+        self, train_loader, val_loader, initial_epoch, nb_epochs, record_bn=True, clipper=None
+    ):
         best_epoch, best_acc = -1, -1.
         wait = 0
 
@@ -161,6 +208,12 @@ class ICarl(IncrementalLearner):
             self._metrics = collections.defaultdict(float)
 
             self._epoch_percent = epoch / (nb_epochs - initial_epoch)
+
+            if epoch == nb_epochs - 1 and record_bn and len(self._multiple_devices) == 1 and \
+               hasattr(training_network.convnet, "record_mode"):
+                logger.info("Recording BN means & vars for MCBN...")
+                training_network.convnet.clear_records()
+                training_network.convnet.record_mode()
 
             prog_bar = tqdm(
                 train_loader,
@@ -187,6 +240,9 @@ class ICarl(IncrementalLearner):
                 )
                 loss.backward()
                 self._optimizer.step()
+
+                if clipper:
+                    training_network.apply(clipper)
 
                 self._print_metrics(prog_bar, epoch, nb_epochs, i)
 
@@ -216,6 +272,9 @@ class ICarl(IncrementalLearner):
 
         if self._eval_every_x_epochs:
             logger.info("Best accuracy reached at epoch {} with {}%.".format(best_epoch, best_acc))
+
+        if len(self._multiple_devices) == 1 and hasattr(training_network.convnet, "record_mode"):
+            training_network.convnet.normal_mode()
 
     def _print_metrics(self, prog_bar, epoch, nb_epochs, nb_batches):
         pretty_metrics = ", ".join(
@@ -256,17 +315,18 @@ class ICarl(IncrementalLearner):
 
         return loss
 
-    def _after_task(self, inc_dataset):
+    def _after_task_intensive(self, inc_dataset):
         if self._herding_selection["type"] == "confusion":
             self._compute_confusion_matrix()
 
         self._data_memory, self._targets_memory, self._herding_indexes, self._class_means = self.build_examplars(
             inc_dataset, self._herding_indexes
         )
-        self._old_model = self._network.copy().freeze().to(self._device)
 
+    def _after_task(self, inc_dataset):
+        self._old_model = self._network.copy().freeze().to(self._device)
         self._network.on_task_end()
-        #self.plot_tsne()
+        # self.plot_tsne()
 
     def _compute_confusion_matrix(self):
         use_validation = self._validation_percent > 0.
@@ -303,7 +363,7 @@ class ICarl(IncrementalLearner):
             loss = F.binary_cross_entropy_with_logits(logits, onehot_targets)
         else:
             with torch.no_grad():
-                old_targets = torch.sigmoid(self._old_model(inputs)["outputs"])
+                old_targets = torch.sigmoid(self._old_model(inputs)["logits"])
 
             new_targets = onehot_targets.clone()
             new_targets[..., :-self._task_size] = old_targets
@@ -363,12 +423,20 @@ class ICarl(IncrementalLearner):
                     selected_indexes = herding.kmeans(
                         features, memory_per_class, k=self._herding_selection["k"]
                     )
-                elif self._herding_selection["confusion"]:
+                elif self._herding_selection["type"] == "confusion":
                     selected_indexes = herding.confusion(
                         *self._last_results,
                         memory_per_class,
                         class_id=class_idx,
                         minimize_confusion=self._herding_selection["minimize_confusion"]
+                    )
+                elif self._herding_selection["type"] == "var_ratio":
+                    selected_indexes = herding.var_ratio(
+                        memory_per_class, self._network, loader, **self._herding_selection
+                    )
+                elif self._herding_selection["type"] == "mcbn":
+                    selected_indexes = herding.mcbn(
+                        memory_per_class, self._network, loader, **self._herding_selection
                     )
                 else:
                     raise ValueError(
@@ -378,8 +446,12 @@ class ICarl(IncrementalLearner):
                 herding_indexes.append(selected_indexes)
 
             # Reducing examplars:
-            selected_indexes = herding_indexes[class_idx][:memory_per_class]
-            herding_indexes[class_idx] = selected_indexes
+            try:
+                selected_indexes = herding_indexes[class_idx][:memory_per_class]
+                herding_indexes[class_idx] = selected_indexes
+            except:
+                import pdb
+                pdb.set_trace()
 
             # Re-computing the examplar mean (which may have changed due to the training):
             examplar_mean = self.compute_examplar_mean(

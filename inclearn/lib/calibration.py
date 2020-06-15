@@ -53,7 +53,7 @@ def _extract_data(network, loader, device):
 
     with torch.no_grad():
         for input_dict in loader:
-            logits.append(network(input_dict["inputs"].to(device)))
+            logits.append(network(input_dict["inputs"].to(device))["logits"])
             labels.append(input_dict["targets"].to(device))
 
         logits = torch.cat(logits).to(device)

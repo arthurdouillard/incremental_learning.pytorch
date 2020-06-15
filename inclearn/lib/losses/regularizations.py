@@ -47,7 +47,7 @@ def ortho_reg(weights, config):
 
 
 def global_orthogonal_regularization(
-    features, targets, new_classes_index, factor=1., normalize=False, sampling="per_target"
+    features, targets, factor=1., normalize=False, cosine=False
 ):
     """Global Orthogonal Regularization (GOR) forces features of different
     classes to be orthogonal.
@@ -70,38 +70,12 @@ def global_orthogonal_regularization(
     if len(unique_targets) == 1:
         return torch.tensor(0.)
 
-    if sampling == "per_target":
-        for target in unique_targets:
-            positive_index = np.random.choice(np.where(targets == target)[0], 1)
-            negative_index = np.random.choice(np.where(targets != target)[0], 1)
+    for target in unique_targets:
+        positive_index = np.random.choice(np.where(targets == target)[0], 1)
+        negative_index = np.random.choice(np.where(targets != target)[0], 1)
 
-            positive_indexes.append(positive_index)
-            negative_indexes.append(negative_index)
-    elif sampling == "old_vs_new_random":
-        for old_index, target in enumerate(targets):
-            if target >= new_classes_index:
-                continue  # Sample belongs to new classes.
-
-            new_index = np.random.choice(np.where(targets >= new_classes_index)[0])
-            positive_indexes.append(old_index)
-            negative_indexes.append(new_index)
-    elif sampling == "per_sample":
-        for positive_index, target in enumerate(targets):
-            negative_index = np.random.choice(np.where(targets != target)[0], 1)
-
-            positive_indexes.append(positive_index)
-            negative_indexes.append(negative_index)
-    elif sampling == "full":
-        pair_indexes = set()
-        for positive_index, target in enumerate(targets):
-            for negative_index in np.where(targets != target)[0]:
-                pair_indexes.add(tuple(sorted((positive_index, negative_index))))
-
-        for p, n in pair_indexes:
-            positive_indexes.append(p)
-            negative_indexes.append(n)
-    else:
-        raise ValueError("Unknown sampling type {}.".format(sampling))
+        positive_indexes.append(positive_index)
+        negative_indexes.append(negative_index)
 
     assert len(positive_indexes) == len(negative_indexes)
 
@@ -114,7 +88,10 @@ def global_orthogonal_regularization(
     positive_features = features[positive_indexes]
     negative_features = features[negative_indexes]
 
-    similarities = torch.sum(torch.mul(positive_features, negative_features), 1)
+    if cosine:
+        similarities = F.cosine_similarity(positive_features, negative_features)
+    else:
+        similarities = torch.sum(torch.mul(positive_features, negative_features), 1)
     features_dim = features.shape[1]
 
     first_moment = torch.mean(similarities)

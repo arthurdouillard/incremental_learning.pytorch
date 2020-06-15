@@ -5,7 +5,8 @@ from torch import optim
 
 from inclearn import models
 from inclearn.convnet import (densenet, my_resnet, my_resnet2, my_resnet_brn,
-                              resnet, ucir_resnet)
+                              my_resnet_mcbn, my_resnet_mtl, resnet,
+                              resnet_mtl, ucir_resnet, vgg)
 from inclearn.lib import data, schedulers
 
 
@@ -25,6 +26,10 @@ def get_optimizer(params, optimizer, lr, weight_decay=0.0):
 def get_convnet(convnet_type, **kwargs):
     if convnet_type == "resnet18":
         return resnet.resnet18(**kwargs)
+    if convnet_type == "resnet101":
+        return resnet.resnet101(**kwargs)
+    if convnet_type == "resnet18_mtl":
+        return resnet_mtl.resnet18(**kwargs)
     elif convnet_type == "resnet34":
         return resnet.resnet34(**kwargs)
     elif convnet_type == "resnet32":
@@ -41,6 +46,12 @@ def get_convnet(convnet_type, **kwargs):
         return densenet.densenet121(**kwargs)
     elif convnet_type == "ucir":
         return ucir_resnet.resnet32(**kwargs)
+    elif convnet_type == "rebuffi_mcbn":
+        return my_resnet_mcbn.resnet_rebuffi(**kwargs)
+    elif convnet_type == "rebuffi_mtl":
+        return my_resnet_mtl.resnet_rebuffi(**kwargs)
+    elif convnet_type == "vgg19":
+        return vgg.vgg19_bn(**kwargs)
 
     raise NotImplementedError("Unknwon convnet type {}.".format(convnet_type))
 
@@ -57,7 +68,9 @@ def get_model(args):
         "ucir": models.UCIR,
         "still": models.STILL,
         "lwm": models.LwM,
-        "zil": models.ZIL
+        "zil": models.ZIL,
+        "zil2": models.ZIL2,
+        "ull": models.ULL
     }
 
     model = args["model"].lower()
@@ -87,7 +100,8 @@ def get_data(args, class_order=None):
         class_order=class_order,
         seed=args["seed"],
         dataset_transforms=args.get("dataset_transforms", {}),
-        all_test_classes=args.get("all_test_classes", False)
+        all_test_classes=args.get("all_test_classes", False),
+        metadata_path=args.get("metadata_path")
     )
 
 
@@ -124,7 +138,9 @@ def get_sampler(args):
 def get_lr_scheduler(
     scheduling_config, optimizer, nb_epochs, lr_decay=0.1, warmup_config=None, task=0
 ):
-    if isinstance(scheduling_config, str):
+    if scheduling_config is None:
+        return None
+    elif isinstance(scheduling_config, str):
         warnings.warn("Use a dict not a string for scheduling config!", DeprecationWarning)
         scheduling_config = {"type": scheduling_config}
     elif isinstance(scheduling_config, list):
@@ -133,7 +149,15 @@ def get_lr_scheduler(
 
     if scheduling_config["type"] == "step":
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, scheduling_config["epochs"], gamma=lr_decay
+            optimizer,
+            scheduling_config["epochs"],
+            gamma=scheduling_config.get("gamma") or lr_decay
+        )
+    elif scheduling_config["type"] == "exponential":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, scheduling_config["gamma"])
+    elif scheduling_config["type"] == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, factor=scheduling_config["gamma"]
         )
     elif scheduling_config["type"] == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, nb_epochs)

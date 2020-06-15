@@ -1,3 +1,4 @@
+import logging
 import math
 import warnings
 
@@ -7,6 +8,8 @@ from torch.nn import functional as F
 
 from inclearn.lib import factory, losses, network, utils
 from inclearn.models.icarl import ICarl
+
+logger = logging.getLogger(__name__)
 
 
 class UCIR(ICarl):
@@ -18,7 +21,9 @@ class UCIR(ICarl):
     def __init__(self, args):
         self._disable_progressbar = args.get("no_progressbar", False)
 
-        self._device = args["device"]
+        self._device = args["device"][0]
+        self._multiple_devices = args["device"]
+
         self._opt_name = args["optimizer"]
         self._lr = args["lr"]
         self._weight_decay = args["weight_decay"]
@@ -26,7 +31,7 @@ class UCIR(ICarl):
 
         self._scheduling = args["scheduling"]
         self._lr_decay = args["lr_decay"]
-        self._herding_selection = args.get("herding_selection", "icarl")
+        self._herding_selection = args.get("herding_selection", {"type": "icarl"})
 
         self._memory_size = args["memory_size"]
         self._fixed_memory = args["fixed_memory"]
@@ -34,15 +39,10 @@ class UCIR(ICarl):
 
         self._eval_every_x_epochs = args.get("eval_every_x_epochs")
 
-        if "distillation_loss" in args:
-            warnings.warn("distillation_loss is replaced by less_forget")
-            args["less_forget"] = args["distillation_loss"]
-            del args["distillation_loss"]
-
-        self._use_mimic_score = args.get("mimic_score", False)
-        self._use_less_forget = args.get("less_forget", True)
+        self._use_mimic_score = args.get("mimic_score")
+        self._use_less_forget = args.get("less_forget")
         self._lambda_schedule = args.get("lambda_schedule", True)
-        self._use_ranking = args.get("ranking_loss", True)
+        self._use_ranking = args.get("ranking_loss")
 
         self._network = network.BasicNet(
             args["convnet"],
@@ -60,9 +60,7 @@ class UCIR(ICarl):
 
         self._old_model = None
 
-        self._warmup_config = args.get("warmup")
-        if self._warmup_config and self._warmup_config["total_epoch"] > 0:
-            self._lr /= self._warmup_config["multiplier"]
+        self._finetuning_config = args.get("finetuning_config")
 
         self._lambda = args.get("base_lambda", 5)
         self._nb_negatives = args.get("nb_negatives", 2)
@@ -73,6 +71,10 @@ class UCIR(ICarl):
         self._herding_indexes = []
 
         self._eval_type = args.get("eval_type", "nme")
+
+        self._meta_transfer = args.get("meta_transfer", False)
+        if self._meta_transfer:
+            assert args["convnet"] == "rebuffi_mtl"
 
         self._args = args
         self._args["_logs"] = {}
@@ -86,7 +88,7 @@ class UCIR(ICarl):
         elif hasattr(self._network.post_processor, "scale"):
             s = self._network.post_processor.scale.item()
         elif hasattr(self._network.post_processor, "factor"):
-            s = self._network.post_processor.factor
+            s = self._network.post_processor.factor.item()
 
         print("Scale is {}.".format(s))
         self._args["_logs"]["scale"].append(s)
@@ -100,15 +102,19 @@ class UCIR(ICarl):
             ypred = []
             ytrue = []
 
-            for inputs, targets, _ in data_loader:
-                ytrue.append(targets.numpy())
+            for input_dict in test_loader:
+                ytrue.append(input_dict["targets"].numpy())
 
-                inputs = inputs.to(self._device)
-                preds = F.softmax(self._network(inputs)[1], dim=1).argmax(dim=1)
+                inputs = input_dict["inputs"].to(self._device)
+                logits = self._network(inputs)["logits"].detach()
+
+                preds = F.softmax(logits, dim=-1)
                 ypred.append(preds.cpu().numpy())
 
             ypred = np.concatenate(ypred)
             ytrue = np.concatenate(ytrue)
+
+            self._last_results = (ypred, ytrue)
 
             return ypred, ytrue
         else:
@@ -117,10 +123,8 @@ class UCIR(ICarl):
     def _gen_weights(self):
         if self._weight_generation:
             utils.add_new_weights(
-                self._network,
-                self._weight_generation if self._task == 0 else "basic",
-                self._n_classes, self._task_size,
-                self.inc_dataset
+                self._network, self._weight_generation if self._task != 0 else "basic",
+                self._n_classes, self._task_size, self.inc_dataset
             )
 
     def _before_task(self, train_loader, val_loader):
@@ -133,31 +137,64 @@ class UCIR(ICarl):
             self._network.parameters(), self._opt_name, self._lr, self._weight_decay
         )
 
-        base_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            self._optimizer, self._scheduling, gamma=self._lr_decay
+        self._scheduler = factory.get_lr_scheduler(
+            self._scheduling, self._optimizer, self._n_epochs, lr_decay=self._lr_decay
         )
 
-        if self._warmup_config:
-            if self._warmup_config.get("only_first_step", True) and self._task != 0:
-                pass
-            else:
-                print("Using WarmUp")
-                self._scheduler = schedulers.GradualWarmupScheduler(
-                    optimizer=self._optimizer,
-                    after_scheduler=base_scheduler,
-                    **self._warmup_config
-                )
-        else:
-            self._scheduler = base_scheduler
+    def _train_task(self, train_loader, val_loader):
+        if self._meta_transfer:
+            logger.info("Setting task meta-transfer")
+            self.set_meta_transfer()
 
-    def _train_task(self, *args, **kwargs):
         for p in self._network.parameters():
-            p.register_hook(lambda grad: torch.clamp(grad, -5., 5.))
+            if p.requires_grad:
+                p.register_hook(lambda grad: torch.clamp(grad, -5., 5.))
 
-        super()._train_task(*args, **kwargs)
+        self._training_step(train_loader, val_loader, 0, self._n_epochs)
 
-    def _compute_loss(self, inputs, features_logits, targets, onehot_targets, memory_flags):
-        features, logits = features_logits
+        if self._finetuning_config and self._task != 0:
+            logger.info("Fine-tuning")
+
+            self._data_memory, self._targets_memory, _, _ = self.build_examplars(
+                self.inc_dataset, self._herding_indexes
+            )
+            loader = self.inc_dataset.get_memory_loader(*self.get_memory())
+
+            if self._finetuning_config["tuning"] == "all":
+                parameters = self._network.parameters()
+            elif self._finetuning_config["tuning"] == "convnet":
+                parameters = self._network.convnet.parameters()
+            elif self._finetuning_config["tuning"] == "classifier":
+                parameters = self._network.classifier.parameters()
+            elif self._finetuning_config["tuning"] == "classifier_scale":
+                parameters = [
+                    {
+                        "params": self._network.classifier.parameters(),
+                        "lr": self._finetuning_config["lr"]
+                    }, {
+                        "params": self._network.post_processor.parameters(),
+                        "lr": self._finetuning_config["lr"]
+                    }
+                ]
+            else:
+                raise NotImplementedError(
+                    "Unknwown finetuning parameters {}.".format(self._finetuning_config["tuning"])
+                )
+
+            self._optimizer = factory.get_optimizer(
+                parameters, self._opt_name, self._finetuning_config["lr"], self._weight_decay
+            )
+            self._scheduler = None
+            self._training_step(
+                loader,
+                val_loader,
+                self._n_epochs,
+                self._n_epochs + self._finetuning_config["epochs"],
+                record_bn=False
+            )
+
+    def _compute_loss(self, inputs, outputs, targets, onehot_targets, memory_flags):
+        features, logits = outputs["raw_features"], outputs["logits"]
 
         # Classification loss is cosine + learned factor + softmax:
         loss = F.cross_entropy(self._network.post_process(logits), targets)
@@ -165,7 +202,8 @@ class UCIR(ICarl):
 
         if self._old_model is not None:
             with torch.no_grad():
-                old_features, old_logits = self._old_model(inputs)
+                old_outputs = self._old_model(inputs)
+                old_features = old_outputs["raw_features"]
 
             if self._use_less_forget:
                 if self._lambda_schedule:
@@ -177,7 +215,7 @@ class UCIR(ICarl):
                     old_features, features
                 )
                 loss += lessforget_loss
-                self._metrics["lessforget"] += lessforget_loss.item()
+                self._metrics["lf"] += lessforget_loss.item()
             elif self._use_mimic_score:
                 old_class_logits = logits[..., :self._n_classes - self._task_size]
                 old_class_old_logits = old_logits[..., :self._n_classes - self._task_size]
@@ -193,7 +231,7 @@ class UCIR(ICarl):
                     targets,
                     self._n_classes,
                     self._task_size,
-                    nb_negatives=self._nb_negatives,
+                    nb_negatives=max(self._nb_negatives, self._task_size),
                     margin=self._margin
                 )
                 loss += ranking_loss

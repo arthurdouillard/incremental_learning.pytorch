@@ -2,7 +2,7 @@ import torch
 from torch.nn import functional as F
 
 
-def unsupervised_rotations(inputs, memory_flags, network, config):
+def unsupervised_rotations(inputs, memory_flags, network, apply_on="all", factor=1.0, **kwargs):
     """Rotates inputs by 90° four times, and predict the angles.
 
     References:
@@ -16,14 +16,14 @@ def unsupervised_rotations(inputs, memory_flags, network, config):
     :param config: A dict of configuration for this loss.
     :return: A float scalar loss.
     """
-    if config["apply_on"] == "all":
+    if apply_on == "all":
         selected_inputs = inputs
-    elif config["apply_on"] == "old":
+    elif apply_on == "old":
         selected_inputs = inputs[memory_flags.eq(1.)]
-    elif config["apply_on"] == "new":
+    elif apply_on == "new":
         selected_inputs = inputs[memory_flags.eq(0.)]
     else:
-        raise ValueError("Invalid apply for rotation prediction: {}.".format(config["apply_on"]))
+        raise ValueError("Invalid apply for rotation prediction: {}.".format(apply_on))
 
     if len(selected_inputs) == 0:
         return torch.tensor(0.)
@@ -37,8 +37,7 @@ def unsupervised_rotations(inputs, memory_flags, network, config):
 
     rotated_inputs = torch.cat(rotated_inputs)
     angles = torch.cat(angles).long().to(inputs.device)
+    outputs = network(rotated_inputs, rotation=True, index=len(inputs))
+    loss = factor * F.cross_entropy(outputs["rotations"], angles)
 
-    predicted_angles = network.predict_rotations(rotated_inputs)
-    loss = config["factor"] * F.cross_entropy(predicted_angles, angles)
-
-    return loss
+    return loss, outputs
