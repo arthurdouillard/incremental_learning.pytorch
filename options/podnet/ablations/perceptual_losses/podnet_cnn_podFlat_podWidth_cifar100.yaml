@@ -1,0 +1,55 @@
+dataset: cifar100
+
+model: podnet
+convnet: rebuffi
+
+eval_type: cnn
+
+classifier_config:
+  type: cosine
+  proxy_per_class: 10
+  distance: neg_stable_cosine_distance
+
+postprocessor_config:
+  type: learned_scaling
+  initial_value: 1.0
+
+pod_flat:
+  scheduled_factor: 5.0
+
+pod_channels:
+  scheduled_factor: 3.0
+  collapse_channels: width
+
+nca:
+  margin: 0.6
+  scale: 1.
+  exclude_pos_denominator: true
+
+groupwise_factors:
+  old_weights: 0.
+
+finetuning_config:
+  sampling: undersampling
+  tuning: classifier
+  lr: 0.05
+  epochs: 20
+  scaling: null
+
+# Cosine Scheduling (CS)
+scheduling: cosine
+
+# Misc
+epochs: 160
+lr: 0.1
+lr_decay: 0.1
+optimizer: sgd
+proxy_per_class: 1
+weight_decay: 0.0005
+
+weight_generation:
+  type: imprinted
+  multi_class_diff: kmeans
+
+dataset_transforms:
+  color_jitter: true

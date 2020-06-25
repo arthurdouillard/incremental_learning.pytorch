@@ -14,63 +14,6 @@ def binarize_and_smooth_labels(T, nb_classes, smoothing_const=0.1):
     return T
 
 
-def proxy_nca_github(D, targets, nb_classes, **config):
-    #return proxy_nca(-D, targets, nb_classes, 1)
-
-    T = binarize_and_smooth_labels(T=targets, nb_classes=nb_classes,
-                                   smoothing_const=0.).to(targets.device)
-
-    # cross entropy with distances as logits, one hot labels
-    # note that compared to proxy nca, positive not excluded in denominator
-    #loss = torch.sum(-T * F.log_softmax(D, -1), -1)
-    loss = additive_margin_softmax_ce(D, targets, **config)
-    return loss
-
-    return loss.mean()
-
-
-def proxy_nca(similarities, targets, nb_classes, proxy_per_class):
-    """NCA with proxies.
-
-    Reference:
-        * No Fuss Distance Metric Learning using Proxies.
-          Movshovitz-Attias et al.
-          AAAI 2017.
-
-    :param similarities: A batch of similarities (or negative distance) between
-                         inputs & proxies.
-    :param targets: Sparse targets.
-    :param nb_classes: Number of classes.
-    :param proxy_per_class: Number of proxy per class.
-    :return: A float scalar loss.
-    """
-    assert similarities.shape[1] == (nb_classes * proxy_per_class)
-
-    positive_proxies_mask = torch.zeros_like(similarities, dtype=torch.bool)
-    indexes = torch.arange(similarities.shape[0])
-    for i in range(proxy_per_class):
-        positive_proxies_mask[indexes, i + proxy_per_class * targets] = True
-
-    similar_pos = similarities[positive_proxies_mask].view(similarities.shape[0], proxy_per_class)
-    most_similar_pos, _ = similar_pos.max(dim=-1)
-
-    negative_proxies = ~positive_proxies_mask
-    negative_similarities = similarities[negative_proxies]
-    negative_similarities = negative_similarities.view(
-        similarities.shape[0], proxy_per_class * (nb_classes - 1)
-    )
-
-    denominator = torch.exp(negative_similarities).sum(-1)
-    numerator = most_similar_pos
-
-    denominator = torch.exp(similarities).sum(-1)
-    loss = -torch.mean(numerator - torch.log(denominator))
-    if loss < 0:
-        import pdb
-        pdb.set_trace()
-    return loss
-
-
 def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memory_indexes):
     memory_indexes = memory_indexes.byte()
 
@@ -97,23 +40,23 @@ def cross_entropy_teacher_confidence(similarities, targets, old_confidence, memo
     return loss
 
 
-def additive_margin_softmax_ce(
+def nca(
     similarities,
     targets,
     class_weights=None,
     focal_gamma=None,
     scale=1,
     margin=0.,
-    exclude_pos_denominator=False,
+    exclude_pos_denominator=True,
     hinge_proxynca=False,
     memory_flags=None,
-    old_classes_temperature=None,
-    new_classes_lambda=None,
-    update_only_pos=False
 ):
     """Compute AMS cross-entropy loss.
 
     Reference:
+        * Goldberger et al.
+          Neighbourhood components analysis.
+          NeuriPS 2005.
         * Feng Wang et al.
           Additive Margin Softmax for Face Verification.
           Signal Processing Letters 2018.
@@ -124,21 +67,13 @@ def additive_margin_softmax_ce(
     :param margin: Margin applied on the "right" (numerator) similarities.
     :param memory_flags: Flags indicating memory samples, although it could indicate
                          anything else.
-    :param old_classes_temperature: Divide all old classes similarities by this constant.
-    :param new_classes_lambda: Multiply all new classes similarities that are in the
-                               numerator by this constant.
     :return: A float scalar loss.
     """
     margins = torch.zeros_like(similarities)
     margins[torch.arange(margins.shape[0]), targets] = margin
     similarities = scale * (similarities - margin)
 
-    if old_classes_temperature:
-        temps = torch.ones_like(similarities)
-        temps[memory_flags.bool()] = old_classes_temperature
-        similarities.div_(temps)
-
-    if exclude_pos_denominator:
+    if exclude_pos_denominator:  # NCA-specific
         similarities = similarities - similarities.max(1)[0].view(-1, 1)  # Stability
 
         disable_pos = torch.zeros_like(similarities)
@@ -147,14 +82,6 @@ def additive_margin_softmax_ce(
 
         numerator = similarities[torch.arange(similarities.shape[0]), targets]
         denominator = similarities - disable_pos
-
-        if new_classes_lambda is not None and memory_flags is not None:
-            lambdas = torch.ones_like(denominator)
-            lambdas[~memory_flags.bool()] = new_classes_lambda
-            denominator.mul_(lambdas)
-
-        if update_only_pos:
-            denominator = denominator.detach()
 
         losses = numerator - torch.log(torch.exp(denominator).sum(-1))
         if class_weights is not None:
@@ -224,258 +151,3 @@ def github_ucir_ranking_mr(logits, targets, n_classes, task_size, nb_negatives=2
             max_novel_scores.view(-1, 1), torch.ones(hard_num*nb_negatives).to(logits.device))
         return loss
     return torch.tensor(0).float()
-
-
-def n_pair_loss(logits, targets):
-    return NPairLoss()(F.relu(logits), targets)
-    #return NPairAngularLoss(angle_bound=math.tan(50)**2)(F.relu(logits), targets)
-    #return apply_loss(logits, targets)
-
-    batch_similarities = torch.mm(logits, logits.t())
-
-    targets_col = targets.view(targets.shape[0], 1)
-    targets_mat = (targets_col == targets_col.t()).float()
-    targets_mat_normalized = targets_mat / (targets_mat.sum(dim=-1).float() - 1.)
-
-    mask = torch.eye(targets.shape[0]).byte()
-    batch_similarities_nodiag = batch_similarities[~mask].view(mask.shape[0], mask.shape[0] - 1)
-    targets_mat_normalized_nodiag = targets_mat_normalized[~mask].view(
-        mask.shape[0], mask.shape[0] - 1
-    )
-
-    return F.binary_cross_entropy(
-        F.softmax(batch_similarities_nodiag, dim=-1), targets_mat_normalized_nodiag
-    )
-
-
-def apply_loss(embeddings, targets, loss_type="npair"):
-
-    def f(x):
-        return x.view(1, -1)
-
-    def npair(anchor, positive, negative):
-        an = torch.mm(f(anchor), f(negative).t())[0][0]
-        ap = torch.mm(f(anchor), f(positive).t())[0][0]
-        return an - ap
-
-    def angular(anchor, positive, negative):
-        alpha = 40
-        cst = torch.pow(torch.tan(alpha), 2)
-
-        ap_n = torch.mm(f(anchor + positive), f(negative).t())
-        ap = torch.mm(f(anchor), f(positive).t())
-
-        return 4 * cst * ap_n - 2 * (1 + cst) * ap
-
-    loss = 0.
-    for anchor_index, target_a in enumerate(targets):  # For X_anchor in batch:
-        anchor_loss = 0.
-
-        for positive_index in targets.eq(target_a):
-            if anchor_index == positive_index:
-                continue
-
-            for negative_index, target_n in enumerate(targets):
-                if target_a == target_n:
-                    continue
-
-            if loss_type == "npair":
-                _loss = npair(
-                    embeddings[anchor_index], embeddings[positive_index.item()],
-                    embeddings[negative_index]
-                )
-            else:
-                raise ValueError("bad loss ", loss_type)
-
-            anchor_loss += torch.exp(_loss)
-
-        loss += torch.log(1 + anchor_loss)
-
-    return loss / len(targets)
-
-
-class NPairLoss(nn.Module):
-    """
-    N-Pair loss
-    Sohn, Kihyuk. "Improved Deep Metric Learning with Multi-class N-pair Loss Objective," Advances in Neural Information
-    Processing Systems. 2016.
-    http://papers.nips.cc/paper/6199-improved-deep-metric-learning-with-multi-class-n-pair-loss-objective
-    """
-
-    def __init__(self, l2_reg=0.02):
-        super(NPairLoss, self).__init__()
-        self.l2_reg = l2_reg
-
-    def forward(self, embeddings, target):
-        n_pairs, n_negatives = self.get_n_pairs(target)
-
-        if embeddings.is_cuda:
-            n_pairs = n_pairs.cuda()
-            n_negatives = n_negatives.cuda()
-
-        anchors = embeddings[n_pairs[:, 0]]  # (n, embedding_size)
-        positives = embeddings[n_pairs[:, 1]]  # (n, embedding_size)
-        negatives = embeddings[n_negatives]  # (n, n-1, embedding_size)
-
-        losses = self.n_pair_loss(anchors, positives, negatives) \
-           # + self.l2_reg * self.l2_loss(anchors, positives)
-
-        return losses
-
-    @staticmethod
-    def get_n_pairs(labels):
-        """
-        Get index of n-pairs and n-negatives
-        :param labels: label vector of mini-batch
-        :return: A tuple of n_pairs (n, 2)
-                        and n_negatives (n, n-1)
-        """
-        labels = labels.cpu().data.numpy()
-        n_pairs = []
-
-        for label in set(labels):
-            label_mask = (labels == label)
-            label_indices = np.where(label_mask)[0]
-            if len(label_indices) < 2:
-                continue
-            anchor, positive = np.random.choice(label_indices, 2, replace=False)
-            n_pairs.append([anchor, positive])
-
-        n_pairs = np.array(n_pairs)
-
-        n_negatives = []
-        for i in range(len(n_pairs)):
-            negative = np.concatenate([n_pairs[:i, 1], n_pairs[i + 1:, 1]])
-            n_negatives.append(negative)
-
-        n_negatives = np.array(n_negatives)
-
-        return torch.LongTensor(n_pairs), torch.LongTensor(n_negatives)
-
-    @staticmethod
-    def n_pair_loss(anchors, positives, negatives):
-        """
-        Calculates N-Pair loss
-        :param anchors: A torch.Tensor, (n, embedding_size)
-        :param positives: A torch.Tensor, (n, embedding_size)
-        :param negatives: A torch.Tensor, (n, n-1, embedding_size)
-        :return: A scalar
-        """
-        anchors = torch.unsqueeze(anchors, dim=1)  # (n, 1, embedding_size)
-        positives = torch.unsqueeze(positives, dim=1)  # (n, 1, embedding_size)
-
-        x = torch.matmul(anchors, (negatives - positives).transpose(1, 2))  # (n, 1, n-1)
-        x = torch.sum(torch.exp(x), 2)  # (n, 1)
-        loss = torch.mean(torch.log(1 + x))
-        return loss
-
-    @staticmethod
-    def l2_loss(anchors, positives):
-        """
-        Calculates L2 norm regularization loss
-        :param anchors: A torch.Tensor, (n, embedding_size)
-        :param positives: A torch.Tensor, (n, embedding_size)
-        :return: A scalar
-        """
-        return torch.sum(anchors**2 + positives**2) / anchors.shape[0]
-
-
-class AngularLoss(NPairLoss):
-    """
-    Angular loss
-    Wang, Jian. "Deep Metric Learning with Angular Loss," CVPR, 2017
-    https://arxiv.org/pdf/1708.01682.pdf
-    """
-
-    def __init__(self, l2_reg=0.02, angle_bound=1., lambda_ang=2):
-        super(AngularLoss, self).__init__()
-        self.l2_reg = l2_reg
-        self.angle_bound = angle_bound
-        self.lambda_ang = lambda_ang
-        self.softplus = nn.Softplus()
-
-    def forward(self, embeddings, target):
-        n_pairs, n_negatives = self.get_n_pairs(target)
-
-        if embeddings.is_cuda:
-            n_pairs = n_pairs.cuda()
-            n_negatives = n_negatives.cuda()
-
-        anchors = embeddings[n_pairs[:, 0]]  # (n, embedding_size)
-        positives = embeddings[n_pairs[:, 1]]  # (n, embedding_size)
-        negatives = embeddings[n_negatives]  # (n, n-1, embedding_size)
-
-        losses = self.angular_loss(anchors, positives, negatives, self.angle_bound) \
-                 + self.l2_reg * self.l2_loss(anchors, positives)
-
-        return losses
-
-    @staticmethod
-    def angular_loss(anchors, positives, negatives, angle_bound=1.):
-        """
-        Calculates angular loss
-        :param anchors: A torch.Tensor, (n, embedding_size)
-        :param positives: A torch.Tensor, (n, embedding_size)
-        :param negatives: A torch.Tensor, (n, n-1, embedding_size)
-        :param angle_bound: tan^2 angle
-        :return: A scalar
-        """
-        anchors = torch.unsqueeze(anchors, dim=1)  # (n, 1, embedding_size)
-        positives = torch.unsqueeze(positives, dim=1)  # (n, 1, embedding_size)
-
-        x = 4. * angle_bound * torch.matmul((anchors + positives), negatives.transpose(1, 2)) \
-            - 2. * (1. + angle_bound) * torch.matmul(anchors, positives.transpose(1, 2))  # (n, 1, n-1)
-
-        # Preventing overflow
-        with torch.no_grad():
-            t = torch.max(x, dim=2)[0]
-
-        x = torch.exp(x - t.unsqueeze(dim=1))
-        x = torch.log(torch.exp(-t) + torch.sum(x, 2))
-        loss = torch.mean(t + x)
-
-        return loss
-
-
-class NPairAngularLoss(AngularLoss):
-    """
-    Angular loss
-    Wang, Jian. "Deep Metric Learning with Angular Loss," CVPR, 2017
-    https://arxiv.org/pdf/1708.01682.pdf
-    """
-
-    def __init__(self, l2_reg=0.02, angle_bound=1., lambda_ang=2):
-        super(NPairAngularLoss, self).__init__()
-        self.l2_reg = l2_reg
-        self.angle_bound = angle_bound
-        self.lambda_ang = lambda_ang
-
-    def forward(self, embeddings, target):
-        n_pairs, n_negatives = self.get_n_pairs(target)
-
-        if embeddings.is_cuda:
-            n_pairs = n_pairs.cuda()
-            n_negatives = n_negatives.cuda()
-
-        anchors = embeddings[n_pairs[:, 0]]  # (n, embedding_size)
-        positives = embeddings[n_pairs[:, 1]]  # (n, embedding_size)
-        negatives = embeddings[n_negatives]  # (n, n-1, embedding_size)
-
-        losses = self.n_pair_angular_loss(anchors, positives, negatives, self.angle_bound) \
-            + self.l2_reg * self.l2_loss(anchors, positives)
-
-        return losses
-
-    def n_pair_angular_loss(self, anchors, positives, negatives, angle_bound=1.):
-        """
-        Calculates N-Pair angular loss
-        :param anchors: A torch.Tensor, (n, embedding_size)
-        :param positives: A torch.Tensor, (n, embedding_size)
-        :param negatives: A torch.Tensor, (n, n-1, embedding_size)
-        :param angle_bound: tan^2 angle
-        :return: A scalar, n-pair_loss + lambda * angular_loss
-        """
-        n_pair = self.n_pair_loss(anchors, positives, negatives)
-        angular = self.angular_loss(anchors, positives, negatives, angle_bound)
-
-        return (n_pair + self.lambda_ang * angular) / (1 + self.lambda_ang)

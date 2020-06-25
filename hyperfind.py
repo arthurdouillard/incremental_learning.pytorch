@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument("-options", "--options", default=None, nargs="+")
     parser.add_argument("-threads", default=2, type=int)
     parser.add_argument("-resume", default=False, action="store_true")
+    parser.add_argument("-metric", default="avg_inc_acc", choices=["avg_inc_acc", "last_acc"])
 
     return parser.parse_args()
 
@@ -45,6 +46,7 @@ def train_func(config, reporter):
 
     total_avg_inc_acc = statistics.mean(all_acc)
     reporter(avg_inc_acc=total_avg_inc_acc)
+    #reporter(last_acc=last_acc)
     return total_avg_inc_acc
 
 
@@ -54,24 +56,27 @@ def _get_abs_path(path):
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), path)
 
 
-def analyse_ray_dump(ray_directory, topn):
+def analyse_ray_dump(ray_directory, topn, metric="avg_inc_acc"):
+    if metric not in ("avg_inc_acc", "last_acc"):
+        raise NotImplementedError("Unknown metric {}.".format(metric))
+
     ea = Analysis(ray_directory)
     trials_dataframe = ea.dataframe()
-    trials_dataframe = trials_dataframe.sort_values(by="avg_inc_acc", ascending=False)
+    trials_dataframe = trials_dataframe.sort_values(by=metric, ascending=False)
 
     mapping_col_to_index = {}
     result_index = -1
     for index, col in enumerate(trials_dataframe.columns):
         if col.startswith("config:"):
             mapping_col_to_index[col[7:]] = index
-        elif col == "avg_inc_acc":
+        elif col == metric:
             result_index = index
 
     print("Ray config: {}".format(ray_directory))
     print("Best Config:")
     print(
-        "avg_inc_acc: {} with {}.".format(
-            trials_dataframe.iloc[0][result_index],
+        "{}: {} with {}.".format(
+            metric, trials_dataframe.iloc[0][result_index],
             _get_line_results(trials_dataframe, 0, mapping_col_to_index)
         )
     )
@@ -119,6 +124,9 @@ def get_tune_config(tune_options, options_files):
     with open(tune_options) as f:
         options = yaml.load(f, Loader=yaml.FullLoader)
 
+    if "epochs" in options and options["epochs"] == 1:
+        raise ValueError("Using only 1 epoch, must be a mistake.")
+
     config = {}
     for k, v in options.items():
         if not k.startswith("var:"):
@@ -141,6 +149,12 @@ def main():
     if args.tune is not None:
         config = get_tune_config(args.tune, args.options)
         config["threads"] = args.threads
+
+        try:
+            os.system("echo '\ek{}_gridsearch\e\\'".format(args.tune))
+        except:
+            pass
+
         ray.init()
         tune.run(
             train_func,
@@ -158,10 +172,12 @@ def main():
         args.ray_directory = os.path.join(args.ray_directory, args.tune.rstrip("/").split("/")[-1])
 
     if args.tune is not None:
-        print("\n\n", args.tune, "\n\n")
+        print("\n\n", args.tune, args.options, "\n\n")
 
     if args.ray_directory is not None:
-        best_config = analyse_ray_dump(_get_abs_path(args.ray_directory), args.topn)
+        best_config = analyse_ray_dump(
+            _get_abs_path(args.ray_directory), args.topn, metric=args.metric
+        )
 
         if args.output_options:
             with open(args.output_options, "w+") as f:

@@ -4,9 +4,6 @@ from .bic import BiC
 from .e2e import End2End
 from .icarl import ICarl
 from .lwm import LwM
-from .still import STILL
-from .test import Test
+from .podnet import PODNet
 from .ucir import UCIR
-from .ull import ULL
 from .zil import ZIL
-from .zil_bis import ZIL2

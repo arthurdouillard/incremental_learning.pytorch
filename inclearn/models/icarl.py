@@ -6,14 +6,14 @@ import pickle
 
 import numpy as np
 import torch
-from inclearn.lib import factory, herding, losses, network, schedulers, utils
-from inclearn.lib.network import hook
-from inclearn.models.base import IncrementalLearner
 from scipy.spatial.distance import cdist
-from sklearn.metrics import confusion_matrix
 from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
+
+from inclearn.lib import factory, herding, losses, network, schedulers, utils
+from inclearn.lib.network import hook
+from inclearn.models.base import IncrementalLearner
 
 EPSILON = 1e-8
 
@@ -63,8 +63,6 @@ class ICarl(IncrementalLearner):
 
         self._rotations_config = args.get("rotations_config", {})
         self._random_noise_config = args.get("random_noise_config", {})
-
-        self._save_model = args["save_model"]
 
         self._network = network.BasicNet(
             args["convnet"],

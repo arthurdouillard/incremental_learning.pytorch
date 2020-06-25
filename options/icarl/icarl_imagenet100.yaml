@@ -1,0 +1,19 @@
+dataset: imagenet100
+
+model: icarl
+convnet: resnet18
+convnet_config:
+  nf: 64
+
+batch_size: 64
+
+lr: 1.0
+weight_decay: 0.00001
+scheduling:
+  - 20
+  - 30
+  - 40
+  - 50
+lr_decay: 0.2
+optimizer: sgd
+epochs: 60

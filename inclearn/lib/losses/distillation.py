@@ -25,78 +25,35 @@ def mer_loss(new_logits, old_logits):
     return torch.mean(((new_probs - old_probs) * torch.log(new_probs)).sum(-1), dim=0)
 
 
-def residual_attention_distillation(
+def pod(
     list_attentions_a,
     list_attentions_b,
-    use_depth_weights=False,
-    collapse_channels="channels",
-    preprocess="square",
+    collapse_channels="spatial",
     normalize=True,
     memory_flags=None,
     only_old=False,
-    aggreg=False,
-    layer_weights=None,
-    weight_per_channels=False,
-    task_percent=None,
-    percent_mult=None,
-    min_inverse_percent=5,
-    percent_depth=False,
-    depth_spatial=False,
-    min_depth=10,
     **kwargs
 ):
-    """Residual attention distillation between several attention maps between
-    a teacher and a student network.
+    """Pooled Output Distillation.
 
     Reference:
-        * S. Zagoruyko and N. Komodakis.
-          Paying more attention to attention: Improving the performance of
-          convolutional neural networks via attention transfer.
-          ICLR 2016.
+        * Douillard et al.
+          Small Task Incremental Learning.
+          arXiv 2020.
 
     :param list_attentions_a: A list of attention maps, each of shape (b, n, w, h).
     :param list_attentions_b: A list of attention maps, each of shape (b, n, w, h).
+    :param collapse_channels: How to pool the channels.
+    :param memory_flags: Integer flags denoting exemplars.
+    :param only_old: Only apply loss to exemplars.
     :return: A float scalar loss.
     """
     assert len(list_attentions_a) == len(list_attentions_b)
-
-    if use_depth_weights is True:
-        depth_weights = torch.tensor(list(range(len(list_attentions_a), -1, -1))) + 1
-        depth_weights = F.normalize(depth_weights.float(), dim=0).to(list_attentions_a[0].device)
-    if isinstance(use_depth_weights, str) and use_depth_weights == "reverse":
-        depth_weights = torch.tensor(list(range(len(list_attentions_a)))) + 1
-        depth_weights = F.normalize(depth_weights.float(), dim=0).to(list_attentions_a[0].device)
-
-    if layer_weights is not None and len(layer_weights) != len(list_attentions_a):
-        raise ValueError(
-            "Number of weights & number of activations not matching"
-            " ({} vs {}).".format(len(layer_weights), len(list_attentions_a))
-        )
-
-    if percent_depth:
-        total_channels = sum(a.shape[1] for a in list_attentions_a)
-        channels_subset = max(math.ceil(total_channels * task_percent), min_depth)
 
     loss = torch.tensor(0.).to(list_attentions_a[0].device)
     for i, (a, b) in enumerate(zip(list_attentions_a, list_attentions_b)):
         # shape of (b, n, w, h)
         assert a.shape == b.shape, (a.shape, b.shape)
-
-        if percent_depth:
-            if channels_subset <= 0:
-                continue
-
-            c = a.shape[1]
-            if c >= channels_subset:
-                # Not all channels will be used
-                collapse_channels = channels_subset
-                channels_subset = 0
-            else:
-                collapse_channels = c
-                channels_subset -= c
-            nb_to_collapse = collapse_channels
-            if depth_spatial:
-                collapse_channels = "spatial_k"
 
         if only_old:
             a = a[memory_flags]
@@ -104,85 +61,21 @@ def residual_attention_distillation(
             if len(a) == 0:
                 continue
 
-        if preprocess == "square":
-            a = torch.pow(a, 2)
-            b = torch.pow(b, 2)
-        elif preprocess == "relu_square":
-            a = torch.pow(F.relu(a), 2)
-            b = torch.pow(F.relu(b), 2)
-        elif preprocess == "abs":
-            a = torch.abs(a)
-            b = torch.abs(b)
-        elif preprocess is None:
-            pass
-        else:
-            raise NotImplementedError(
-                "Unknown preprocess for residual attention: {}.".format(preprocess)
-            )
+        a = torch.pow(a, 2)
+        b = torch.pow(b, 2)
 
-        if isinstance(collapse_channels, int):
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(a.shape[0], a.shape[1])
-            topk_channels = torch.argsort(scores_a, descending=True, dim=1)
-            topk_channels = topk_channels[..., :collapse_channels]
-
-            a = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            b = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
+        if collapse_channels == "channels":
             a = a.sum(dim=1).view(a.shape[0], -1)  # shape of (b, w * h)
             b = b.sum(dim=1).view(b.shape[0], -1)
-        elif collapse_channels == "percent":
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(
-                a.shape[0], a.shape[1]
-            )  # shape of (b, c)
-            topk_channels = torch.argsort(scores_a, descending=True, dim=-1)
-
-            mult = a.shape[1] * task_percent
-            if percent_mult is not None:
-                mult *= percent_mult[i]
-            topk_channels = topk_channels[..., :math.ceil(mult)]
-
-            # Horrible but only way to be fast.
-            # Index for the whole batch the desired channels (can be multiple channels).
-            a = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            b = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
-            a = a.sum(dim=1).view(a.shape[0], -1)  # shape of (b, w * h)
-            b = b.sum(dim=1).view(b.shape[0], -1)
-        elif collapse_channels == "inverse_percent":
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(
-                a.shape[0], a.shape[1]
-            )  # shape of (b, c)
-            topk_channels = torch.argsort(scores_a, descending=True, dim=-1)
-
-            mult = math.ceil(a.shape[1] * (1 - task_percent))
-            mult = min(mult, min_inverse_percent)
-            topk_channels = topk_channels[..., :mult]
-
-            # Horrible but only way to be fast.
-            # Index for the whole batch the desired channels (can be multiple channels).
-            a = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            b = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
-            a = a.sum(dim=1).view(a.shape[0], -1)  # shape of (b, w * h)
-            b = b.sum(dim=1).view(b.shape[0], -1)
-        elif collapse_channels == "channels":
-            a = a.sum(dim=1).view(a.shape[0], -1)  # shape of (b, w * h)
-            b = b.sum(dim=1).view(b.shape[0], -1)
-        elif collapse_channels == "max_pool_channels":
-            a = F.max_pool2d(a, kernel_size=2)
-            b = F.max_pool2d(b, kernel_size=2)
-
-            a = a.sum(dim=1).view(a.shape[0], -1)  # shape of (b, w * h)
-            b = b.sum(dim=1).view(b.shape[0], -1)
-        elif collapse_channels == "mean":
-            a = a.mean(dim=1).view(a.shape[0], -1)  # shape of (b, w * h)
-            b = b.mean(dim=1).view(b.shape[0], -1)
         elif collapse_channels == "width":
             a = a.sum(dim=2).view(a.shape[0], -1)  # shape of (b, c * h)
             b = b.sum(dim=2).view(b.shape[0], -1)
         elif collapse_channels == "height":
             a = a.sum(dim=3).view(a.shape[0], -1)  # shape of (b, c * w)
             b = b.sum(dim=3).view(b.shape[0], -1)
+        elif collapse_channels == "gap":
+            a = F.adaptive_avg_pool2d(a, (1, 1))[..., 0, 0]
+            b = F.adaptive_avg_pool2d(b, (1, 1))[..., 0, 0]
         elif collapse_channels == "spatial":
             a_h = a.sum(dim=3).view(a.shape[0], -1)
             b_h = b.sum(dim=3).view(b.shape[0], -1)
@@ -190,223 +83,16 @@ def residual_attention_distillation(
             b_w = b.sum(dim=2).view(b.shape[0], -1)
             a = torch.cat([a_h, a_w], dim=-1)
             b = torch.cat([b_h, b_w], dim=-1)
-        elif collapse_channels == "spatial_tuple":
-            a_h = a.sum(dim=3).view(a.shape[0], -1)
-            b_h = b.sum(dim=3).view(b.shape[0], -1)
-            a_w = a.sum(dim=2).view(a.shape[0], -1)
-            b_w = b.sum(dim=2).view(b.shape[0], -1)
-            a = (a_h, a_w)
-            b = (b_h, b_w)
-        elif collapse_channels == "gap":
-            a = F.adaptive_avg_pool2d(a, (1, 1))[..., 0, 0]
-            b = F.adaptive_avg_pool2d(b, (1, 1))[..., 0, 0]
-        elif collapse_channels == "spatial_plus_one":
-            a_h = a.sum(dim=3).view(a.shape[0], -1)
-            b_h = b.sum(dim=3).view(b.shape[0], -1)
-            a_w = a.sum(dim=2).view(a.shape[0], -1)
-            b_w = b.sum(dim=2).view(b.shape[0], -1)
-
-            a_one = F.adaptive_avg_pool2d(a, (1, 1))[..., 0, 0]
-            b_one = F.adaptive_avg_pool2d(b, (1, 1))[..., 0, 0]
-
-            a = torch.cat([a_h, a_w, a_one], dim=-1)
-            b = torch.cat([b_h, b_w, b_one], dim=-1)
-        elif collapse_channels == "spatial_plus_one_tuple":
-            a_h = a.sum(dim=3).view(a.shape[0], -1)
-            b_h = b.sum(dim=3).view(b.shape[0], -1)
-            a_w = a.sum(dim=2).view(a.shape[0], -1)
-            b_w = b.sum(dim=2).view(b.shape[0], -1)
-
-            a_one = F.adaptive_avg_pool2d(a, (1, 1))[..., 0, 0]
-            b_one = F.adaptive_avg_pool2d(b, (1, 1))[..., 0, 0]
-
-            a = (a_h, a_w, a_one)
-            b = (b_h, b_w, b_one)
-        elif collapse_channels == "spatial_plus_oneSummed_tuple":
-            a_h = a.sum(dim=3).view(a.shape[0], -1)
-            b_h = b.sum(dim=3).view(b.shape[0], -1)
-            a_w = a.sum(dim=2).view(a.shape[0], -1)
-            b_w = b.sum(dim=2).view(b.shape[0], -1)
-
-            a_one = a.sum(dim=(2, 3))
-            b_one = b.sum(dim=(2, 3))
-            a = (a_h, a_w, a_one)
-            b = (b_h, b_w, b_one)
-        elif collapse_channels == "max_pool_spatial":
-            a = F.max_pool2d(a, kernel_size=2)
-            b = F.max_pool2d(b, kernel_size=2)
-
-            a_h = a.sum(dim=3).view(a.shape[0], -1)
-            b_h = b.sum(dim=3).view(b.shape[0], -1)
-            a_w = a.sum(dim=2).view(a.shape[0], -1)
-            b_w = b.sum(dim=2).view(b.shape[0], -1)
-            a = torch.cat([a_h, a_w], dim=-1)
-            b = torch.cat([b_h, b_w], dim=-1)
-        elif collapse_channels == "spatial_channels":
-            # a: (b, c, w, w) as w = h
-
-            a_h = a.sum(dim=3)  # (b, c, w)
-            b_h = b.sum(dim=3)  # (b, c, w)
-            a_w = a.sum(dim=2)  # (b, c, w)
-            b_w = b.sum(dim=2)  # (b, c, w)
-
-            a = torch.cat((a_h, a_w), dim=-1)  # (b, c, w + w)
-            b = torch.cat((b_h, b_w), dim=-1)  # (b, c, w + w)
-
-            a = a.sum(dim=1)  # (b, w + w)
-            b = b.sum(dim=1)  # (b, w + w)
-        elif collapse_channels == "bossanova":
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(
-                a.shape[0], a.shape[1]
-            )  # shape of (b, c)
-            topk_channels = torch.argsort(scores_a, descending=True, dim=-1)
-            topk_channels = topk_channels[..., :1]
-            aa = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            bb = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
-            aa_flat = aa.view(a.shape[0], 1, -1).repeat(1, a.shape[1], 1)
-            bb_flat = aa.view(b.shape[0], 1, -1).repeat(1, b.shape[1], 1)
-            a_flat = a.view(a.shape[0], a.shape[1], -1)
-            b_flat = b.view(b.shape[0], b.shape[1], -1)
-
-            a = torch.frobenius_norm(aa_flat - a_flat, dim=-1)
-            b = torch.frobenius_norm(bb_flat - b_flat, dim=-1)
-        elif collapse_channels == "bossanova_sorted":
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(
-                a.shape[0], a.shape[1]
-            )  # shape of (b, c)
-            topk_channels = torch.argsort(scores_a, descending=True, dim=-1)
-            topk_channels = topk_channels[..., :1]
-            aa = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            bb = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
-            aa_flat = aa.view(a.shape[0], 1, -1).repeat(1, a.shape[1], 1)
-            bb_flat = bb.view(b.shape[0], 1, -1).repeat(1, b.shape[1], 1)
-            a_flat = a.view(a.shape[0], a.shape[1], -1)
-            b_flat = b.view(b.shape[0], b.shape[1], -1)
-
-            a = torch.frobenius_norm(aa_flat - a_flat, dim=-1).sort(dim=-1)[0]
-            b = torch.frobenius_norm(bb_flat - b_flat, dim=-1).sort(dim=-1)[0]
-        elif collapse_channels == "bossanova_sorted_anchor":
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(
-                a.shape[0], a.shape[1]
-            )  # shape of (b, c)
-            topk_channels = torch.argsort(scores_a, descending=True, dim=-1)
-            topk_channels = topk_channels[..., :1]
-            aa = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            bb = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
-            aa_flat = aa.view(a.shape[0], 1, -1).repeat(1, a.shape[1], 1)
-            bb_flat = bb.view(b.shape[0], 1, -1).repeat(1, b.shape[1], 1)
-
-            aa_single_flat = aa.view(a.shape[0], -1)
-            bb_single_flat = bb.view(b.shape[0], -1)
-
-            a_flat = a.view(a.shape[0], a.shape[1], -1)
-            b_flat = b.view(b.shape[0], b.shape[1], -1)
-
-            a = (torch.frobenius_norm(aa_flat - a_flat, dim=-1).sort(dim=-1)[0], aa_single_flat)
-            b = (torch.frobenius_norm(bb_flat - b_flat, dim=-1).sort(dim=-1)[0], bb_single_flat)
-        elif collapse_channels == "bossanova_sorted_anchor_spatial":
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(
-                a.shape[0], a.shape[1]
-            )  # shape of (b, c)
-            topk_channels = torch.argsort(scores_a, descending=True, dim=-1)
-            topk_channels = topk_channels[..., :1]
-            aa = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            bb = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
-            aa_h = aa.sum(dim=3)
-            aa_w = aa.sum(dim=2)
-            bb_h = bb.sum(dim=3)
-            bb_w = bb.sum(dim=2)
-            aa = torch.cat([aa_h, aa_w], dim=-1)
-            bb = torch.cat([bb_h, bb_w], dim=-1)
-
-            aa_cmp = aa.repeat(1, a.shape[1], 1)
-            bb_cmp = bb.repeat(1, b.shape[1], 1)
-
-            a_h = a.sum(dim=3)
-            b_h = b.sum(dim=3)
-            a_w = a.sum(dim=2)
-            b_w = b.sum(dim=2)
-            a = torch.cat([a_h, a_w], dim=-1)
-            b = torch.cat([b_h, b_w], dim=-1)
-
-            a = (
-                torch.frobenius_norm(aa_cmp - a,
-                                     dim=-1).sort(dim=-1)[0], aa_cmp.view(aa_cmp.shape[0], -1)
-            )
-            b = (
-                torch.frobenius_norm(bb_cmp - b,
-                                     dim=-1).sort(dim=-1)[0], bb_cmp.view(bb_cmp.shape[0], -1)
-            )
-        elif collapse_channels == "bossanova_anchor":
-            scores_a = F.adaptive_avg_pool2d(a, (1, 1)).view(
-                a.shape[0], a.shape[1]
-            )  # shape of (b, c)
-            topk_channels = torch.argsort(scores_a, descending=True, dim=-1)
-            topk_channels = topk_channels[..., :1]
-            aa = a[torch.arange(len(a)), topk_channels.t()].transpose(0, 1)
-            bb = b[torch.arange(len(b)), topk_channels.t()].transpose(0, 1)
-
-            aa_flat = aa.view(a.shape[0], 1, -1).repeat(1, a.shape[1], 1)
-            bb_flat = bb.view(b.shape[0], 1, -1).repeat(1, b.shape[1], 1)
-
-            aa_single_flat = aa.view(a.shape[0], -1)
-            bb_single_flat = bb.view(b.shape[0], -1)
-
-            a_flat = a.view(a.shape[0], a.shape[1], -1)
-            b_flat = b.view(b.shape[0], b.shape[1], -1)
-
-            a = (torch.frobenius_norm(aa_flat - a_flat, dim=-1), aa_single_flat)
-            b = (torch.frobenius_norm(bb_flat - b_flat, dim=-1), bb_single_flat)
         else:
             raise ValueError("Unknown method to collapse: {}".format(collapse_channels))
 
         if normalize:
-            if isinstance(a, tuple):
-                a = [F.normalize(a[i], dim=1, p=2) for i in range(len(a))]
-                b = [F.normalize(b[i], dim=1, p=2) for i in range(len(b))]
-            else:
-                a = F.normalize(a, dim=1, p=2)
-                b = F.normalize(b, dim=1, p=2)
+            a = F.normalize(a, dim=1, p=2)
+            b = F.normalize(b, dim=1, p=2)
 
-        if not aggreg:
-            layer_loss = torch.frobenius_norm(a - b)
-        elif aggreg == "paper":
-            layer_loss = (a - b).pow(2).mean()
-        elif aggreg == "mean":
-            layer_loss = torch.mean(torch.frobenius_norm(a - b, dim=-1))
-        elif aggreg == "tuple_mean":
-            layer_loss = torch.mean(
-                torch.frobenius_norm(torch.cat(a, dim=-1) - torch.cat(b, dim=-1), dim=-1)
-            )
-        elif aggreg == "mean_bossanova_anchor":
-            layer_loss = torch.mean(
-                torch.frobenius_norm(a[0] - b[0], dim=-1) +
-                torch.frobenius_norm(a[1] - b[1], dim=-1)
-            )
-        elif aggreg == "secondmoment":
-            dist = torch.frobenius_norm(a - b, dim=-1)
-            first_moment = torch.mean(dist)
-            second_moment = torch.mean(torch.pow(dist, 2))
-            layer_loss = torch.pow(first_moment,
-                                   2) + torch.clamp(second_moment - 1. / a.shape[-1], min=0.)
-        elif isinstance(aggreg, list):
-            # Maximum Mean Discrepancy, aggreg is a list of sigmas for Gaussian kernels
-            layer_loss = mmd(a, b, sigmas=tuple(aggreg))
-        else:
-            raise NotImplementedError("Unknown aggreg method for RAD: {}.".format(aggreg))
-
-        if use_depth_weights:
-            layer_loss = depth_weights[i] * layer_loss
-        elif layer_weights:
-            layer_loss = layer_weights[i] * layer_loss
+        layer_loss = torch.mean(torch.frobenius_norm(a - b, dim=-1))
         loss += layer_loss
 
-    if use_depth_weights or aggreg == "paper" or percent_depth:
-        return loss
     return loss / len(list_attentions_a)
 
 

@@ -4,9 +4,10 @@ import torch
 from torch import optim
 
 from inclearn import models
-from inclearn.convnet import (densenet, my_resnet, my_resnet2, my_resnet_brn,
-                              my_resnet_mcbn, my_resnet_mtl, resnet,
-                              resnet_mtl, ucir_resnet, vgg)
+from inclearn.convnet import (
+    densenet, my_resnet, my_resnet2, my_resnet_brn, my_resnet_mcbn, my_resnet_mtl, resnet,
+    resnet_mtl, ucir_resnet, vgg
+)
 from inclearn.lib import data, schedulers
 
 
@@ -59,18 +60,15 @@ def get_convnet(convnet_type, **kwargs):
 def get_model(args):
     dict_models = {
         "icarl": models.ICarl,
-        #"lwf": models.LwF,
+        "lwf": None,
         "e2e": models.End2End,
-        #"medic": models.Medic,
-        #"fixed": models.FixedRepresentation,
+        "fixed": None,
         "oracle": None,
         "bic": models.BiC,
         "ucir": models.UCIR,
-        "still": models.STILL,
+        "podnet": models.PODNet,
         "lwm": models.LwM,
-        "zil": models.ZIL,
-        "zil2": models.ZIL2,
-        "ull": models.ULL
+        "zil": models.ZIL
     }
 
     model = args["model"].lower()

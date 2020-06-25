@@ -1,6 +1,0 @@
-initial_increment: 50
-increment: 10
-
-dataset: cifar100
-
-fixed_memory: true
