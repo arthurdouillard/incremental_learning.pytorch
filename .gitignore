@@ -4,3 +4,4 @@ options/dev/
 hyperexps/*
 */.ipynb_checkpoints/*
 notebooks/
+**/*.pyc
