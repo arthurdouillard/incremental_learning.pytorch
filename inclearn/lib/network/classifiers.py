@@ -16,9 +16,18 @@ logger = logging.getLogger(__name__)
 
 
 class Classifier(nn.Module):
+    classifier_type = "fc"
 
     def __init__(
-        self, features_dim, device, *, use_bias=False, normalize=False, init="kaiming", **kwargs
+        self,
+        features_dim,
+        device,
+        *,
+        use_bias=False,
+        normalize=False,
+        init="kaiming",
+        train_negative_weights=False,
+        **kwargs
     ):
         super().__init__()
 
@@ -29,6 +38,13 @@ class Classifier(nn.Module):
         self.normalize = normalize
         self._weights = nn.ParameterList([])
         self._bias = nn.ParameterList([]) if self.use_bias else None
+
+        self.train_negative_weights = train_negative_weights
+        self._negative_weights = None
+        self.use_neg_weights = True
+        self.eval_negative_weights = False
+
+        self.proxy_per_class = 1
 
         self.n_classes = 0
 
@@ -72,10 +88,16 @@ class Classifier(nn.Module):
         if len(self._weights) == 0:
             raise Exception("Add some classes before training.")
 
+        weights = self.weights
+        if self._negative_weights is not None and (
+            self.training is True or self.eval_negative_weights
+        ) and self.use_neg_weights:
+            weights = torch.cat((weights, self._negative_weights), 0)
+
         if self.normalize:
             features = F.normalize(features, dim=1, p=2)
 
-        logits = F.linear(features, self.weights, bias=self.bias)
+        logits = F.linear(features, weights, bias=self.bias)
         return {"logits": logits}
 
     def add_classes(self, n_classes):
@@ -112,8 +134,66 @@ class Classifier(nn.Module):
 
             self._weights[-1] = nn.Parameter((old_norm / new_norm) * self._weights[-1])
 
+    def align_features(self, features):
+        avg_weights_norm = self.weights.data.norm(dim=1).mean()
+        avg_features_norm = features.data.norm(dim=1).mean()
+
+        features.data = features.data * (avg_weights_norm / avg_features_norm)
+        return features
+
+    def add_custom_weights(self, weights, ponderate=None, **kwargs):
+        if isinstance(ponderate, str):
+            if ponderate == "weights_imprinting":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                weights = weights * avg_weights_norm
+            elif ponderate == "align_weights":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                avg_new_weights_norm = weights.data.norm(dim=1).mean()
+
+                ratio = avg_weights_norm / avg_new_weights_norm
+                weights = weights * ratio
+            else:
+                raise NotImplementedError(f"Unknown ponderation type {ponderate}.")
+
+        self._weights.append(nn.Parameter(weights))
+        self.to(self.device)
+
+    def set_negative_weights(self, negative_weights, ponderate=False):
+        """Add weights that are used like the usual weights, but aren't actually
+        parameters.
+
+        :param negative_weights: Tensor of shape (n_classes * nb_proxy, features_dim)
+        :param ponderate: Reponderate the negative weights by the existing weights norm, as done by
+                          "Weights Imprinting".
+        """
+        logger.info("Add negative weights.")
+        if isinstance(ponderate, str):
+            if ponderate == "weights_imprinting":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                negative_weights = negative_weights * avg_weights_norm
+            elif ponderate == "align_weights":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                avg_negative_weights_norm = negative_weights.data.norm(dim=1).mean()
+
+                ratio = avg_weights_norm / avg_negative_weights_norm
+                negative_weights = negative_weights * ratio
+            elif ponderate == "inv_align_weights":
+                avg_weights_norm = self.weights.data.norm(dim=1).mean()
+                avg_negative_weights_norm = negative_weights.data.norm(dim=1).mean()
+
+                ratio = avg_negative_weights_norm / avg_weights_norm
+                negative_weights = negative_weights * ratio
+            else:
+                raise NotImplementedError(f"Unknown ponderation type {ponderate}.")
+
+        if self.train_negative_weights:
+            self._negative_weights = nn.Parameter(negative_weights)
+        else:
+            self._negative_weights = negative_weights
+
 
 class CosineClassifier(nn.Module):
+    classifier_type = "cosine"
 
     def __init__(
         self,
