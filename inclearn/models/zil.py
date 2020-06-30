@@ -1,3 +1,4 @@
+import collections
 import copy
 import functools
 import logging
@@ -43,15 +44,16 @@ class ZIL(ICarl):
         self.fakeclassifier_config = args.get("fake_classifier", {})
 
         # Losses definition
-        self._attention_residual_config = args.get("attention_residual", {})
+        self._pod_spatial_config = args.get("pod_spatial", {})
         self._pod_flat_config = args.get("pod_flat", {})
         self.ghost_config = args.get("ghost_regularization", {})
         self.real_config = args.get("semantic_regularization", {})
         self.hyperplan_config = args.get("hyperplan_regularization", {})
         self.placement_config = args.get("ghost_placement_config", {})
         self.adv_placement_config = args.get("adv_ghost_placement_config", {})
+        self.ucir_ranking_config = args.get("ucir_ranking", {})
 
-        self._ams_config = args.get("adaptative_margin_softmax", {})
+        self._nca_config = args.get("nca", {})
         self._softmax_ce = args.get("softmax_ce", False)
 
         logger.info("Initializing ZIL")
@@ -246,8 +248,9 @@ class ZIL(ICarl):
             )
         elif self._task == 1:
             utils.add_new_weights(
-                self._network, {"type": "imprinted"}, self._n_classes, self._task_size,
-                self.inc_dataset
+                self._network, {"type": "imprinted"}
+                if self._network.classifier.classifier_type == "cosine" else {"type": "basic"},
+                self._n_classes, self._task_size, self.inc_dataset
             )
         elif self._new_weights_config["type"] == "neg_weights":
             # Take the neg weights
@@ -653,7 +656,7 @@ class ZIL(ICarl):
                 disable_progressbar=self._disable_progressbar
             )
 
-            if config.get("align_weights"):
+            if config.get("align_weights") and self._task > 0:
                 self._network.classifier.align_weights()
             if config.get("del_neg_weights", False):
                 logger.info("Re-enabling neg weights & ghosts.")
@@ -942,27 +945,27 @@ class ZIL(ICarl):
             with torch.no_grad():
                 old_outputs = self._old_model(inputs)
 
-            if self._attention_residual_config:
-                if self._attention_residual_config.get("scheduled_factor", False):
-                    factor = self._attention_residual_config["scheduled_factor"] * math.sqrt(
+            if self._pod_spatial_config:
+                if self._pod_spatial_config.get("scheduled_factor", False):
+                    factor = self._pod_spatial_config["scheduled_factor"] * math.sqrt(
                         self._n_classes / self._task_size
                     )
                 else:
-                    factor = self._attention_residual_config.get("factor", 1.)
+                    factor = self._pod_spatial_config.get("factor", 1.)
 
-                attention_loss = factor * losses.residual_attention_distillation(
+                attention_loss = factor * losses.pod(
                     old_outputs["attention"],
                     outputs["attention"],
                     memory_flags=memory_flags.bool(),
                     task_percent=(self._task + 1) / self._n_tasks,
-                    **self._attention_residual_config
+                    **self._pod_spatial_config
                 )
                 loss += attention_loss
                 metrics["att"] += attention_loss.item()
             if self._pod_flat_config:
                 factor = self._pod_flat_config.get("factor", 1.)
 
-                if self._pod_flat_config["scheduled", False]:
+                if self._pod_flat_config.get("scheduled", False):
                     factor = factor * math.sqrt(self._n_classes / self._task_size)
 
                 distil_loss = factor * losses.embeddings_similarity(
@@ -1104,19 +1107,19 @@ class ZIL(ICarl):
                 if config.get("only_ghost_placement", False):
                     return loss
 
-        if self._ams_config:
-            ams_config = copy.deepcopy(self._ams_config)
+        if self._nca_config:
+            nca_config = copy.deepcopy(self._nca_config)
             if self.ghost_config:
-                ams_config.update(self.ghost_config.get("ams_loss", {}))
+                nca_config.update(self.ghost_config.get("ams_loss", {}))
             if self._network.post_processor:
-                ams_config["scale"] = self._network.post_processor.factor
+                nca_config["scale"] = self._network.post_processor.factor
 
-            loss += losses.additive_margin_softmax_ce(
+            loss += losses.nca(
                 outputs["logits"],
                 targets,
                 class_weights=self._class_weights,
                 memory_flags=ghost_flags,
-                **ams_config
+                **nca_config
             )
             metrics["ams"] += loss.item()
         elif self._softmax_ce:
@@ -1127,26 +1130,52 @@ class ZIL(ICarl):
         else:
             raise ValueError("No classification loss defined!")
 
+        if self._task > 0 and self.ucir_ranking_config:
+            if ghost_batch_size is not None:
+                r_logits = outputs["logits"][:-ghost_batch_size]
+                r_targets = targets[:-ghost_batch_size]
+            else:
+                r_logits = outputs["logits"]
+                r_targets = targets
+
+            ranking_loss = self.ucir_ranking_config.get("factor", 1.0) * losses.ucir_ranking(
+                r_logits, r_targets.to(r_logits.device), self._n_classes, self._task_size
+            )
+            metrics["rnk"] += ranking_loss.item()
+            loss += ranking_loss
+
         if self._old_model is not None:
             with torch.no_grad():
                 old_outputs = self._old_model(inputs)
 
-            if self._attention_residual_config:
-                if self._attention_residual_config.get("scheduled_factor", False):
-                    factor = self._attention_residual_config["scheduled_factor"] * math.sqrt(
+            if self._pod_spatial_config:
+                if self._pod_spatial_config.get("scheduled_factor", False):
+                    factor = self._pod_spatial_config["scheduled_factor"] * math.sqrt(
                         self._n_classes / self._task_size
                     )
                 else:
-                    factor = self._attention_residual_config.get("factor", 1.)
+                    factor = self._pod_spatial_config.get("factor", 1.)
 
-                attention_loss = factor * losses.residual_attention_distillation(
+                attention_loss = factor * losses.pod(
                     old_outputs["attention"],
                     outputs["attention"],
                     task_percent=(self._task + 1) / self._n_tasks,
-                    **self._attention_residual_config
+                    **self._pod_spatial_config
                 )
                 loss += attention_loss
                 metrics["att"] += attention_loss.item()
+
+            if self._pod_flat_config:
+                factor = self._pod_flat_config.get("factor", 1.)
+
+                if self._pod_flat_config.get("scheduled", False):
+                    factor = factor * math.sqrt(self._n_classes / self._task_size)
+
+                distil_loss = factor * losses.embeddings_similarity(
+                    outputs["raw_features"], old_outputs["raw_features"]
+                )
+                loss += distil_loss
+                metrics["flat"] += distil_loss.item()
 
         if self._task != 0 and self._task != self._n_tasks - 1:
             if self.hyperplan_config:
@@ -1171,11 +1200,22 @@ class ZIL(ICarl):
                     if self.hyperplan_config.get("normalize_features", True):
                         features = F.normalize(features, dim=1, p=2)
 
-                    simi = torch.mm(features, self._hyperplan.T)
-                    if self.hyperplan_config.get("add_bias", False):
-                        simi = simi + self._hyperplan_bias
-
-                    simi = simi.view(-1)
+                    if self._svm_weights is None:
+                        simi = torch.mm(features, self._hyperplan.T)
+                        if self.hyperplan_config.get("add_bias", False):
+                            simi = simi + self._hyperplan_bias
+                        simi = simi.view(-1)
+                    else:
+                        simi = []
+                        for sv, gamma, dual_coef, intercept in zip(
+                            self._svm_weights["sv"], self._svm_weights["gamma"],
+                            self._svm_weights["dual_coef"], self._svm_weights["intercept"]
+                        ):
+                            diff = sv[None, :, :] - features[:, None, :]
+                            tmp = torch.exp(-gamma * diff.norm(dim=-1)**2)
+                            dec = dual_coef.mm(tmp.T) - intercept
+                            simi.append(dec.view(-1))
+                        simi = torch.cat(simi)
 
                     # simi should be in [-1 + b, +1 + b]
 
@@ -1276,19 +1316,19 @@ class ZIL(ICarl):
         return F.mse_loss(visual_features, semantic_features)
 
     def forward_fakeclassifier(self, logits, targets, flags, metrics):
-        if self._ams_config:
-            ams_config = copy.deepcopy(self._ams_config)
-            ams_config.update(self.fakeclassifier_config.get("loss", {}))
+        if self._nca_config:
+            nca_config = copy.deepcopy(self._nca_config)
+            nca_config.update(self.fakeclassifier_config.get("loss", {}))
             if self._network.post_processor:
-                ams_config["scale"] = self._network.post_processor.factor
+                nca_config["scale"] = self._network.post_processor.factor
 
             try:
-                loss = losses.additive_margin_softmax_ce(
+                loss = losses.nca(
                     logits,
                     targets,
                     class_weights=self._class_weights_fake,
                     memory_flags=flags,
-                    **ams_config,
+                    **nca_config,
                 )
             except:
                 breakpoint()
@@ -1373,7 +1413,8 @@ class ZIL(ICarl):
                     normalize_features=self.hyperplan_config.get("normalize_features", True),
                     one_per_ghost=self.hyperplan_config.get("one_per_ghost", False),
                     apply_current=self.hyperplan_config.get("apply_current", True),
-                    flip=self.hyperplan_config.get("flip", False)
+                    flip=self.hyperplan_config.get("flip", False),
+                    kernel=self.hyperplan_config.get("kernel", "linear")
                 )
         else:
             self._hyperplan = None
@@ -1475,8 +1516,11 @@ class ZIL(ICarl):
         normalize_features=True,
         one_per_ghost=False,
         apply_current=True,
-        flip=False
+        flip=False,
+        kernel="linear"
     ):
+        self._svm_weights = None
+
         logger.info("Generating hyperplan constraint.")
         if apply_current:  # Just previous task
             classes = list(range(self._n_classes - self._task_size, self._n_classes))
@@ -1497,7 +1541,10 @@ class ZIL(ICarl):
 
         if one_per_ghost:
             ghost_targets = ghost_targets.cpu().numpy()
-            hyperplans, biases = [], []
+            if kernel == "linear":
+                hyperplans, biases = [], []
+            else:
+                self._svm_weights = collections.defaultdict(list)
 
             for class_id in np.unique(ghost_targets):
                 tmp_ghost_features = ghost_features[np.where(ghost_targets == class_id)[0]]
@@ -1509,14 +1556,31 @@ class ZIL(ICarl):
 
                 tmp_targets = np.concatenate((real_targets, np.ones(len(tmp_ghost_features))))
 
-                svm = SVC(C=C, kernel="linear")
+                svm = SVC(C=C, kernel=kernel, gamma="scale")
                 svm.fit(tmp_features, tmp_targets)
 
-                hyperplans.append(torch.tensor(svm.coef_[0]).float().to(self._device)[None])
-                biases.append(torch.tensor(svm.intercept_[0]).float().to(self._device))
+                if kernel == "linear":
+                    hyperplans.append(torch.tensor(svm.coef_[0]).float().to(self._device)[None])
+                    biases.append(torch.tensor(svm.intercept_[0]).float().to(self._device))
+                else:
+                    self._svm_weights["sv"].append(
+                        torch.tensor(svm.support_vectors_).float().to(self._device)
+                    )
+                    self._svm_weights["gamma"].append(
+                        1 / (tmp_features.shape[1] * tmp_features.var())
+                    )
+                    self._svm_weights["dual_coef"].append(
+                        torch.tensor(svm.dual_coef_).float().to(self._device)
+                    )
+                    self._svm_weights["intercept"].append(
+                        torch.tensor(svm.intercept_).float().to(self._device)
+                    )
 
-            hyperplan = torch.cat(hyperplans)
-            bias = torch.stack(biases)
+            if kernel == "linear":
+                hyperplan = torch.cat(hyperplans)
+                bias = torch.stack(biases)
+            else:
+                hyperplan, bias = None, None
         else:
             ghost_targets = np.ones(len(ghost_features))
 
@@ -1525,13 +1589,26 @@ class ZIL(ICarl):
                 features = features / np.linalg.norm(features, axis=1, keepdims=True)
             targets = np.concatenate((real_targets, ghost_targets))
 
-            svm = SVC(C=C, kernel="linear")
+            svm = SVC(C=C, kernel=kernel, gamma="scale")
             svm.fit(features, targets)
             acc = svm.score(features, targets)
             logger.info(f"SVM got {acc} on the train set (binary, real vs ghost).")
 
-            hyperplan = torch.tensor(svm.coef_[0]).float().to(self._device)[None]
-            bias = torch.tensor(svm.intercept_[0]).float().to(self._device)
+            if kernel == "linear":
+                hyperplan = torch.tensor(svm.coef_[0]).float().to(self._device)[None]
+                bias = torch.tensor(svm.intercept_[0]).float().to(self._device)
+            else:
+                self._svm_weights = {
+                    "sv":
+                        [torch.tensor(svm.support_vectors_).float().to(self._device)],
+                    "gamma":
+                        [torch.tensor([1 / (features.shape[1] * features.var())]).float().to(self._device)],
+                    "dual_coef":
+                        [torch.tensor(svm.dual_coef_).float().to(self._device)],
+                    "intercept":
+                        [torch.tensor(svm.intercept_).float().to(self._device)]
+                }
+                hyperplan, bias = None, None
 
         if end_normalize:
             hyperplan = F.normalize(hyperplan, dim=1, p=2)
