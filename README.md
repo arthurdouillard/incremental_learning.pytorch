@@ -17,9 +17,9 @@ If you use this paper/code in your research, please consider citing us:
 
 ```
 @inproceedings{douillard2020podnet,
-    title={Small-Task Incremental Learning},
-    author={Arthur Douillard and Matthieu Cord and Charles Ollion and Thomas Robert and Eduardo Valle},
-    booktitle={arXiv preprint library},
+    title={PODNet: Pooled Outputs Distillation for Small-Tasks Incremental Learning},
+    author={Douillard, Arthur and Cord, Matthieu and Ollion, Charles and Robert, Thomas and Valle, Eduardo},
+    booktitle={Proceedings of the IEEE European Conference on Computer Vision (ECCV)},
     year={2020}
 }
 ```
