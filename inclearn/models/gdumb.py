@@ -96,6 +96,11 @@ class GDumb(ICarl):
             if p.requires_grad:
                 p.register_hook(lambda grad: torch.clamp(grad, -self._grad_clip, self._grad_clip))
 
+        if self._task > 0:
+            train_loader = self.inc_dataset.get_custom_loader(
+                [], memory=self.get_memory(), mode="train"
+            )[1]
+
         self._training_step(
             train_loader, val_loader, 0,
             self._first_task_n_epochs if self._task == 0 else self._n_epochs
