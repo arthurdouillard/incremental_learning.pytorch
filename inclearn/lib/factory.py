@@ -68,7 +68,8 @@ def get_model(args):
         "ucir": models.UCIR,
         "podnet": models.PODNet,
         "lwm": models.LwM,
-        "zil": models.ZIL
+        "zil": models.ZIL,
+        "gdumb": models.GDumb
     }
 
     model = args["model"].lower()
@@ -164,6 +165,10 @@ def get_lr_scheduler(
             optimizer,
             t_max=scheduling_config.get("cycle_len", nb_epochs),
             factor=scheduling_config.get("factor", 1.)
+        )
+    elif scheduling_config["type"] == "cosine_annealing_with_restart":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=1, T_mult=2, eta_min=scheduling_config.get("min_lr")
         )
     else:
         raise ValueError("Unknown LR scheduling type {}.".format(scheduling_config["type"]))

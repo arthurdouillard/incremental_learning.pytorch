@@ -417,6 +417,8 @@ class ICarl(IncrementalLearner):
                     selected_indexes = herding.closest_to_mean(features, memory_per_class)
                 elif self._herding_selection["type"] == "random":
                     selected_indexes = herding.random(features, memory_per_class)
+                elif self._herding_selection["type"] == "first":
+                    selected_indexes = np.arange(memory_per_class)
                 elif self._herding_selection["type"] == "kmeans":
                     selected_indexes = herding.kmeans(
                         features, memory_per_class, k=self._herding_selection["k"]

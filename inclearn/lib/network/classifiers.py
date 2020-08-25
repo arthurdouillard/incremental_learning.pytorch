@@ -110,6 +110,9 @@ class Classifier(nn.Module):
 
         self.to(self.device)
 
+    def reset_weights(self):
+        self._init(self.init_method, self.weights)
+
     @staticmethod
     def _init(init_method, parameters):
         if isinstance(init_method, float) or isinstance(init_method, int):
