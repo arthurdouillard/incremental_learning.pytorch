@@ -1,0 +1,45 @@
+model: ucir
+convnet: rebuffi
+convnet_config:
+  last_relu: false
+
+memory_size: 2000
+fixed_memory: True
+
+classifier_config:
+  scaling: 1
+  gamma: 1
+  type: cosine
+  proxy_per_class: 1
+  distance: neg_stable_cosine_distance
+
+less_forget:
+  scheduled_factor: true
+  lambda: 5
+
+postprocessor_config:
+  initial_value: 1.0
+  type: learned_scaling
+
+ranking_loss:
+  factor: 1.0
+  nb_negatives: 2
+  margin: 0.5
+
+finetuning_config:
+  tuning: classifier
+  lr: 0.05
+  epochs: 20
+
+lr: 0.1
+weight_decay: 0.0005
+scheduling:
+  type: step
+  epochs: [80, 120]
+  gamma: 0.1
+lr_decay: 0.1
+optimizer: sgd
+epochs: 160
+
+weight_generation:
+  type: imprinted
