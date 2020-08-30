@@ -102,7 +102,7 @@ class UCIR(ICarl):
             ypred = []
             ytrue = []
 
-            for input_dict in test_loader:
+            for input_dict in data_loader:
                 ytrue.append(input_dict["targets"].numpy())
 
                 inputs = input_dict["inputs"].to(self._device)
