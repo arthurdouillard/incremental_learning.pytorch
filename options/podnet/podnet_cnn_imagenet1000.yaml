@@ -8,6 +8,7 @@ convnet_config:
   nf: 64
 
 batch_size: 64
+memory_size: 20000
 
 eval_type: cnn
 
@@ -51,7 +52,7 @@ lr: 0.05
 lr_decay: 0.1
 optimizer: sgd
 proxy_per_class: 1
-weight_decay: 0.0005
+weight_decay: 0.0001
 
 weight_generation:
   type: imprinted
