@@ -9,9 +9,18 @@ You can find the list of the latter on my [Google Scholar](https://scholar.googl
 
 Every model must inherit `inclearn.models.base.IncrementalLearner`.
 
-## Small Task Incremental Learning
+<div align="center">
 
-Under review, preprint on arXiv [here](https://arxiv.org/abs/2004.13513).
+# PODNet: Pooled Outputs Distillation for Small-Tasks Incremental Learning
+
+[![Paper](https://img.shields.io/badge/arXiv-2004.13513-brightgreen)](https://arxiv.org/abs/2004.13513)
+![ECCV](https://img.shields.io/badge/ECCC-2020-blue)]
+
+</div>
+
+![podnet](images/podnet.png)
+
+![podnet plot](images/podnet_plot.png)
 
 If you use this paper/code in your research, please consider citing us:
 
@@ -57,9 +66,16 @@ python3 -minclearn --options options/podnet/podnet_cnn_imagenet100.yaml options/
 Furthermore several options files are available to reproduce the ablations showcased
 in the paper. Please see the directory `./options/podnet/ablations/`.
 
-## Insight From the Future for Continual Learning
+<div align="center">
 
-Under review, preprint on arXiv [here](https://arxiv.org/abs/2006.13748).
+# Insight From the Future for Continual Learning
+
+[![Paper](https://img.shields.io/badge/arXiv-2006.13748-brightgreen)](https://arxiv.org/abs/2006.13748)
+![Preprint](https://img.shields.io/badge/Preprint-2020-blue)]
+
+</div>
+
+![ghost](images/ghost.png)
 
 If you use this paper/code in your research, please consider citing us:
 
