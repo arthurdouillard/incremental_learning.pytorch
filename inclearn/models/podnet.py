@@ -38,7 +38,7 @@ class PODNet(ICarl):
 
         # Rehearsal Learning:
         self._memory_size = args["memory_size"]
-        self._fixed_memory = args["fixed_memory"]
+        self._fixed_memory = args.get("fixed_memory", True)
         self._herding_selection = args.get("herding_selection", {"type": "icarl"})
         self._n_classes = 0
         self._last_results = None
