@@ -181,7 +181,7 @@ def accuracy(output, targets, topk=1):
     pred = pred.t()
     correct = pred.eq(targets.view(1, -1).expand_as(pred))
 
-    correct_k = correct[:topk].view(-1).float().sum(0).item()
+    correct_k = correct[:topk].reshape(-1).float().sum(0).item()
     return round(correct_k / batch_size, 3)
 
 
