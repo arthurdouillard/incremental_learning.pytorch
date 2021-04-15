@@ -10,5 +10,5 @@ pandas
 requests
 psutil
 tqdm
-Pillow==6.2.0
+Pillow==8.1.1
 gensim>=3.8.1
