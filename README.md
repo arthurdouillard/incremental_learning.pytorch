@@ -16,7 +16,7 @@ Every model must inherit `inclearn.models.base.IncrementalLearner`.
 # PODNet: Pooled Outputs Distillation for Small-Tasks Incremental Learning
 
 [![Paper](https://img.shields.io/badge/arXiv-2004.13513-brightgreen)](https://arxiv.org/abs/2004.13513)
-![ECCV](https://img.shields.io/badge/ECCC-2020-blue)
+![ECCV](https://img.shields.io/badge/ECCV-2020-blue)
 [![Youtube](https://img.shields.io/badge/Youtube-link-red)](https://www.youtube.com/watch?v=SWFO1_lTcR8)
 
 </div>
@@ -74,7 +74,7 @@ in the paper. Please see the directory `./options/podnet/ablations/`.
 # Insight From the Future for Continual Learning
 
 [![Paper](https://img.shields.io/badge/arXiv-2006.13748-brightgreen)](https://arxiv.org/abs/2006.13748)
-![Preprint](https://img.shields.io/badge/Preprint-2020-blue)]
+![CVPR Workshop](https://img.shields.io/badge/CVPRW-2021-blue)
 
 </div>
 
