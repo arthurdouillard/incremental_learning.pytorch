@@ -1,9 +1,11 @@
 # Incremental Learners for Continual Learning
 
-Repository storing all my public works done during my PhD thesis (2019-).
+Repository storing some my public works done during my PhD thesis (2019-).
 
 You will find in there both known implementation (iCaRL, etc.) but also all my papers.
 You can find the list of the latter on my [Google Scholar](https://scholar.google.com/citations?user=snwgZBIAAAAJ&hl=en).
+
+My work on continual segmentation can be found [here](https://github.com/arthurdouillard/CVPR2021_PLOP) and on continual data loaders [here](https://github.com/Continvvm/continuum).
 
 ## Structures
 
@@ -14,7 +16,8 @@ Every model must inherit `inclearn.models.base.IncrementalLearner`.
 # PODNet: Pooled Outputs Distillation for Small-Tasks Incremental Learning
 
 [![Paper](https://img.shields.io/badge/arXiv-2004.13513-brightgreen)](https://arxiv.org/abs/2004.13513)
-![ECCV](https://img.shields.io/badge/ECCC-2020-blue)]
+![ECCV](https://img.shields.io/badge/ECCC-2020-blue)
+[![Youtube](https://img.shields.io/badge/Youtube-link-red)](https://www.youtube.com/watch?v=SWFO1_lTcR8)
 
 </div>
 
